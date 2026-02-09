@@ -1,0 +1,4 @@
+*.xpi
+*.zip
+web-ext-artifacts/
+.claude/

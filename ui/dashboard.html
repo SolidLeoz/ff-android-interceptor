@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Mobile Interceptor (PT)</title>
+  <link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="title">Mobile Interceptor</div>
+      <div class="subtitle">Intercept + Repeater (Firefox Android)</div>
+    </div>
+
+    <label class="toggle">
+      <input id="toggleIntercept" type="checkbox" />
+      <span>Intercept</span>
+    </label>
+  </header>
+
+  <main class="wrap">
+<section class="card">
+  <div class="cardHead">
+    <h2>Scope</h2>
+    <div class="muted">Intercept solo target</div>
+  </div>
+
+  <div class="grid">
+    <label>
+      <span>Scope mode</span>
+      <select id="scopeMode">
+        <option value="ALLOWLIST">ALLOWLIST (consigliato)</option>
+        <option value="OFF">OFF (intercetta tutto)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>Bypass static assets</span>
+      <select id="bypassStatic">
+        <option value="true">ON</option>
+        <option value="false">OFF</option>
+      </select>
+    </label>
+
+    <label class="col2">
+      <span>Allow domains (uno per riga: example.com oppure *.example.com)</span>
+      <textarea id="allowDomains" rows="4" spellcheck="false"></textarea>
+    </label>
+
+    <label class="col2">
+      <span>Allow URL contains (uno per riga: /api/ , /graphql , ecc.)</span>
+      <textarea id="allowUrlContains" rows="3" spellcheck="false"></textarea>
+    </label>
+
+    <div class="actions col2">
+      <button id="btnLoadPolicy" class="ghost">Load</button>
+      <button id="btnSavePolicy" class="primary">Save</button>
+      <button id="btnPanicOff" class="danger">PANIC: Intercept OFF</button>
+    </div>
+  </div>
+</section>
+
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Queue</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div class="pill" id="queueSize">0</div>
+          <button id="btnForwardAll" class="primary btn-sm" disabled>Forward All</button>
+          <button id="btnDropAll" class="danger btn-sm" disabled>Drop All</button>
+        </div>
+      </div>
+      <div id="queueList" class="list"></div>
+    </section>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Editor</h2>
+        <div class="muted" id="editorHint">Seleziona una request dalla Queue.</div>
+      </div>
+
+      <div class="grid">
+        <label>
+          <span>Method</span>
+          <input id="reqMethod" type="text" placeholder="GET/POST/PUT..." />
+        </label>
+
+        <label class="col2">
+          <span>URL</span>
+          <input id="reqUrl" type="text" placeholder="https://target/..." />
+        </label>
+
+        <label class="col2">
+          <span>Headers (JSON: {"name":"value"})</span>
+          <textarea id="reqHeaders" rows="6" spellcheck="false"></textarea>
+        </label>
+
+        <label class="col2">
+          <span>Body (testo) oppure Base64 raw</span>
+          <textarea id="reqBody" rows="8" spellcheck="false"></textarea>
+        </label>
+
+        <div class="actions col2">
+          <button id="btnForward" class="primary" disabled>Forward</button>
+          <button id="btnDrop" class="danger" disabled>Drop</button>
+          <button id="btnSaveRepeater" class="ghost" disabled>Send to Repeater</button>
+        </div>
+      </div>
+
+      <details class="note">
+        <summary>Limiti importanti</summary>
+        <ul>
+          <li>La request originale viene <b>cancellata</b>; “Forward” è un <b>replay</b> via fetch.</li>
+          <li>Alcuni header sono <b>proibiti</b> (Host/Cookie/alcuni Origin/Referer): il browser li filtra.</li>
+          <li>Multipart file upload: spesso <b>non hai</b> i blob file completi via webRequest.</li>
+        </ul>
+      </details>
+    </section>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Repeater</h2>
+        <button id="btnRefreshRepeater" class="ghost">Refresh</button>
+      </div>
+
+      <div id="repeaterList" class="list"></div>
+
+      <div class="cardSub">
+        <h3>Response</h3>
+        <div style="display:flex;gap:8px;margin-bottom:6px">
+          <button id="btnSaveNote" class="ghost btn-sm" disabled>Save to Notes</button>
+        </div>
+        <pre id="responseBox" class="pre"></pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Notes</h2>
+        <div style="display:flex;gap:8px">
+          <button id="btnExportNotes" class="ghost btn-sm">Esporta</button>
+          <button id="btnClearNotes" class="danger btn-sm">Cancella tutto</button>
+        </div>
+      </div>
+      <div id="notesList" class="list"></div>
+    </section>
+
+    <div id="ctxMenu" class="ctx-menu hidden">
+      <div id="ctxAddScope" class="ctx-item">Aggiungi dominio allo scope</div>
+    </div>
+  </main>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
+
