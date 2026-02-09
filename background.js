@@ -59,7 +59,7 @@ const AUDIT_KEY = "interceptorAuditLog";
   try {
     const cur = await browser.storage.local.get(POLICY_KEY);
     if (cur && cur[POLICY_KEY]) Object.assign(policy, cur[POLICY_KEY]);
-  } catch (_) {}
+  } catch (e) { console.warn("[MI] loadPolicy failed:", e); }
 })();
 
 async function savePolicy() {
@@ -100,14 +100,14 @@ function base64ToBuf(b64) {
 function denormalizeHeaders(headersObj) {
   const h = new Headers();
   for (const [k, v] of Object.entries(headersObj || {})) {
-    try { h.set(k, String(v)); } catch (_) {}
+    try { h.set(k, String(v)); } catch (e) { console.debug("[MI] header set failed:", k, e); }
   }
   return h;
 }
 
 function broadcast(type, payload) {
   for (const p of state.ports) {
-    try { p.postMessage({ type, payload }); } catch (_) {}
+    try { p.postMessage({ type, payload }); } catch (e) { console.debug("[MI] port.postMessage failed:", e); }
   }
 }
 
@@ -126,7 +126,7 @@ async function appendAuditLog(action, details) {
     log.push({ timestamp: nowIso(), action, ...details });
     log = MILib.trimArray(log, RETENTION.audit);
     await browser.storage.local.set({ [AUDIT_KEY]: log });
-  } catch (_) {}
+  } catch (e) { console.warn("[MI] appendAuditLog failed:", e); }
 }
 
 // Android-safe: open dashboard in a tab
@@ -139,7 +139,7 @@ async function openDashboardTab() {
       await browser.tabs.update(existing.id, { active: true });
       return;
     }
-  } catch (_) {}
+  } catch (e) { console.warn("[MI] openDashboardTab query failed:", e); }
   await browser.tabs.create({ url });
 }
 
@@ -210,7 +210,7 @@ browser.webRequest.onBeforeRequest.addListener(
           } else if (details.requestBody.formData) {
             entry.requestBody = { kind: "formData", formData: safeClone(details.requestBody.formData) };
           }
-        } catch (_) {}
+        } catch (e) { entry.bodyHint = "Body capture error: " + String(e); }
       }
 
       state.pending.set(details.requestId, entry);
@@ -376,7 +376,7 @@ browser.runtime.onMessage.addListener(async (msg) => {
       if (entry && entry.tabId > 0 && entry.type === "main_frame") {
         const now = Date.now();
         state.passthrough.set(entry.tabId, { url: "about:blank", time: now, mainFrameDone: true, mainFrameTime: now });
-        try { await browser.tabs.update(entry.tabId, { url: "about:blank" }); } catch (_) {}
+        try { await browser.tabs.update(entry.tabId, { url: "about:blank" }); } catch (e) { console.debug("[MI] tabs.update failed:", e); }
       }
 
       appendAuditLog("DROP", { requestId: id, method: entry?.method, url: entry?.url });
@@ -395,7 +395,7 @@ browser.runtime.onMessage.addListener(async (msg) => {
 
       if (entry && entry.tabId > 0 && entry.type === "main_frame") {
         state.passthrough.set(entry.tabId, { url: edited.url, time: Date.now(), mainFrameDone: false, mainFrameTime: 0 });
-        try { await browser.tabs.update(entry.tabId, { url: edited.url }); } catch (_) {}
+        try { await browser.tabs.update(entry.tabId, { url: edited.url }); } catch (e) { console.debug("[MI] tabs.update failed:", e); }
       }
 
       appendAuditLog("FORWARD", { requestId: id, method: edited.method, url: edited.url });
@@ -439,7 +439,11 @@ browser.runtime.onMessage.addListener(async (msg) => {
     }
 
     case "SET_POLICY": {
-      Object.assign(policy, msg.policy || {});
+      const POLICY_KEYS = ["scopeMode", "allowDomains", "allowUrlContains", "bypassStaticAssets", "bypassTypes", "bypassOptions"];
+      const incoming = msg.policy || {};
+      for (const k of POLICY_KEYS) {
+        if (k in incoming) policy[k] = incoming[k];
+      }
       await savePolicy();
       broadcast("POLICY_UPDATED", { policy });
       appendAuditLog("POLICY_CHANGE", { scopeMode: policy.scopeMode, domainCount: policy.allowDomains.length });
@@ -453,7 +457,7 @@ browser.runtime.onMessage.addListener(async (msg) => {
         if (entry && entry.tabId > 0 && entry.type === "main_frame") {
           const now = Date.now();
           state.passthrough.set(entry.tabId, { url: "about:blank", time: now, mainFrameDone: true, mainFrameTime: now });
-          try { await browser.tabs.update(entry.tabId, { url: "about:blank" }); } catch (_) {}
+          try { await browser.tabs.update(entry.tabId, { url: "about:blank" }); } catch (e) { console.debug("[MI] tabs.update failed:", e); }
         }
       }
       state.pending.clear();
@@ -480,7 +484,7 @@ browser.runtime.onMessage.addListener(async (msg) => {
 
         if (entry.tabId > 0 && entry.type === "main_frame") {
           state.passthrough.set(entry.tabId, { url: entry.url, time: Date.now(), mainFrameDone: false, mainFrameTime: 0 });
-          try { await browser.tabs.update(entry.tabId, { url: entry.url }); } catch (_) {}
+          try { await browser.tabs.update(entry.tabId, { url: entry.url }); } catch (e) { console.debug("[MI] tabs.update failed:", e); }
         }
         state.pending.delete(id);
 
@@ -552,6 +556,10 @@ async function replayRequest(req) {
 
   const method = (req.method || "GET").toUpperCase();
   const url = req.url;
+
+  if (typeof url !== "string" || !(url.startsWith("http://") || url.startsWith("https://"))) {
+    return { ok: false, error: "Invalid URL scheme. Only http:// and https:// are allowed.", durationMs: 0 };
+  }
 
   const headersObj = req.headers || {};
   const headers = denormalizeHeaders(headersObj);
