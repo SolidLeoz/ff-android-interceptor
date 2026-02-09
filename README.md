@@ -184,11 +184,16 @@ npm run lint # Run web-ext lint
 - [PRIVACY.md](PRIVACY.md) — Privacy policy (AMO compliance)
 - [LICENSE](LICENSE) — MIT License
 
-## Legal
+## Legal Disclaimer
 
-This tool is intended **exclusively** for authorized security testing (penetration testing with written authorization, CTF challenges, bug bounty programs, security research on your own assets).
+This tool is intended **exclusively** for:
+- **Personal lab environments** — testing on your own devices and networks
+- **Educational purposes** — learning about HTTP traffic, web security, and penetration testing techniques
+- **Authorized penetration testing** — with explicit written permission from the system owner (e.g., bug bounty programs, contracted pentests, CTF challenges)
 
-**Do not** use this tool to intercept, modify, or inspect traffic without explicit authorization from the system owner.
+**You must NOT** use this tool to intercept, modify, or replay traffic on systems you do not own or do not have explicit written authorization to test. Unauthorized interception of network traffic may violate computer fraud and abuse laws in your jurisdiction.
+
+The developers assume no liability for misuse of this tool. By installing and using this extension, you accept full responsibility for ensuring your use complies with all applicable laws and regulations.
 
 ## License
 

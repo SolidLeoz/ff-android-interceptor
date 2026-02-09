@@ -908,6 +908,22 @@ btnPanicOff.addEventListener("click", async () => {
   await refreshQueue();
 });
 
+// --- Disclaimer ---
+(async function initDisclaimer() {
+  const disclaimerEl = el("disclaimer");
+  const btnDismiss = el("btnDismissDisclaimer");
+  if (!disclaimerEl || !btnDismiss) return;
+  try {
+    const stored = await browser.storage.local.get("disclaimerDismissed");
+    if (stored.disclaimerDismissed) disclaimerEl.classList.add("hidden");
+  } catch (e) { console.debug("[MI] disclaimer storage read:", e); }
+  btnDismiss.addEventListener("click", async () => {
+    disclaimerEl.classList.add("hidden");
+    try { await browser.storage.local.set({ disclaimerDismissed: true }); }
+    catch (e) { console.debug("[MI] disclaimer storage write:", e); }
+  });
+})();
+
 // --- Boot ---
 setButtonsEnabled(false);
 setBulkButtonsEnabled(false);
