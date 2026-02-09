@@ -915,8 +915,8 @@ btnPanicOff.addEventListener("click", async () => {
   if (!disclaimerEl || !btnDismiss) return;
   try {
     const stored = await browser.storage.local.get("disclaimerDismissed");
-    if (stored.disclaimerDismissed) disclaimerEl.classList.add("hidden");
-  } catch (e) { console.debug("[MI] disclaimer storage read:", e); }
+    if (!stored.disclaimerDismissed) disclaimerEl.classList.remove("hidden");
+  } catch (e) { disclaimerEl.classList.remove("hidden"); }
   btnDismiss.addEventListener("click", async () => {
     disclaimerEl.classList.add("hidden");
     try { await browser.storage.local.set({ disclaimerDismissed: true }); }
