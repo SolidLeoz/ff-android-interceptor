@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Mobile Interceptor (PT)",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Interceptor + Repeater mobile-first per PT autorizzati (Firefox Android).",
   "icons": {
     "48": "icons/icon-48.png",
@@ -12,11 +12,12 @@
     "webRequestBlocking",
     "<all_urls>",
     "storage",
-    "tabs",
-    "cookies"
+    "tabs"
   ],
   "background": {
     "scripts": [
+      "lib/redact.js",
+      "lib/utils.js",
       "background.js"
     ],
     "persistent": true

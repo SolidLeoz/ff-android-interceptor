@@ -179,3 +179,43 @@ select{
   border-radius: 8px; cursor: pointer;
 }
 .ctx-item:active { background: rgba(110,231,255,.15) }
+
+/* Mode switch in topbar */
+.mode-switch { display:flex; gap:8px; align-items:center }
+.mode-switch select { width:auto; padding:8px 10px; font-size:12px; font-weight:800 }
+
+/* ARMED indicator */
+.topbar.armed {
+  background: rgba(255,60,60,.18);
+  border-bottom-color: rgba(255,92,122,.5);
+}
+.topbar.observe {
+  background: rgba(255,180,0,.12);
+  border-bottom-color: rgba(255,180,0,.4);
+}
+.armed-badge {
+  display:inline-block;
+  padding:4px 10px; border-radius:999px;
+  background:rgba(255,92,122,.25);
+  color:var(--danger);
+  font-weight:800; font-size:11px;
+  letter-spacing:1px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.armed-badge.observe-badge {
+  background:rgba(255,180,0,.2);
+  color:#ffb400;
+}
+.armed-badge.hidden { display:none }
+
+@keyframes pulse {
+  0%,100% { opacity:1 }
+  50% { opacity:.5 }
+}
+
+/* Toggle small variant */
+.toggle-sm { font-size:11px; font-weight:600 }
+.toggle-sm input { transform:scale(1) }
+
+/* Observe item style */
+.item.observe-item { opacity:.7; border-style:dashed }

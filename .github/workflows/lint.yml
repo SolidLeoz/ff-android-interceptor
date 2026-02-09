@@ -1,0 +1,26 @@
+name: Lint & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Install web-ext
+        run: npm install -g web-ext
+
+      - name: Run web-ext lint
+        run: web-ext lint --source-dir=.

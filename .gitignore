@@ -2,3 +2,5 @@
 *.zip
 web-ext-artifacts/
 .claude/
+IMPLEMENTATION_PLAN.md
+node_modules/

@@ -1,16 +1,24 @@
-/* ui/dashboard.js */
+/* ui/dashboard.js
+ * Shared modules available via <script> tags:
+ * - MILib  (redactHeaders, redactBody, trimArray, createRateLimiter)
+ * - MIUtils (normalizeHeaders, hostMatchesWildcard, isStaticAssetUrl, shouldInterceptWith, parseHeadersJson, bodyToEditor)
+ */
 
 const port = browser.runtime.connect({ name: "dashboard" });
 
-let interceptEnabled = false;
+let currentMode = "OFF";
 let currentId = null;
 let currentEntry = null;
 let lastForwardedRequest = null;
 let lastForwardedResponse = null;
+let showSensitive = false;
 
 const el = (id) => document.getElementById(id);
 
-const toggleIntercept = el("toggleIntercept");
+const topbar = el("topbar");
+const interceptModeSelect = el("interceptMode");
+const armedBadge = el("armedBadge");
+
 const queueSize = el("queueSize");
 const queueList = el("queueList");
 
@@ -31,6 +39,7 @@ const btnRefreshRepeater = el("btnRefreshRepeater");
 const responseBox = el("responseBox");
 const editorHint = el("editorHint");
 const btnSaveNote = el("btnSaveNote");
+const toggleSensitive = el("toggleSensitive");
 
 const scopeMode = el("scopeMode");
 const bypassStatic = el("bypassStatic");
@@ -44,20 +53,55 @@ const notesList = el("notesList");
 const btnExportNotes = el("btnExportNotes");
 const btnClearNotes = el("btnClearNotes");
 
+const auditList = el("auditList");
+const btnRefreshAudit = el("btnRefreshAudit");
+const btnClearAudit = el("btnClearAudit");
+
 const ctxMenu = el("ctxMenu");
 const ctxAddScope = el("ctxAddScope");
 
-// --- Context menu state ---
 let ctxTarget = null;
+
+// --- Redaction helpers ---
+function displayHeaders(headers) {
+  if (showSensitive) return headers;
+  return MILib.redactHeaders(headers);
+}
+
+function displayBody(bodyText, contentType) {
+  if (showSensitive) return bodyText;
+  return MILib.redactBody(bodyText, contentType);
+}
 
 // --- Flash helper ---
 function flashButton(btn, cls = "flash-ok") {
   btn.classList.remove(cls);
-  void btn.offsetWidth; // force reflow
+  void btn.offsetWidth;
   btn.classList.add(cls);
   btn.addEventListener("animationend", () => btn.classList.remove(cls), { once: true });
 }
 
+// --- Mode UI ---
+function updateModeUI(mode) {
+  currentMode = mode;
+  interceptModeSelect.value = mode;
+  topbar.classList.remove("armed", "observe");
+  armedBadge.classList.add("hidden");
+  armedBadge.classList.remove("observe-badge");
+
+  if (mode === "INTERCEPT") {
+    topbar.classList.add("armed");
+    armedBadge.textContent = "ARMED";
+    armedBadge.classList.remove("hidden");
+  } else if (mode === "OBSERVE") {
+    topbar.classList.add("observe");
+    armedBadge.textContent = "OBSERVE";
+    armedBadge.classList.remove("hidden");
+    armedBadge.classList.add("observe-badge");
+  }
+}
+
+// --- Policy ---
 function policyToForm(p) {
   scopeMode.value = p.scopeMode || "ALLOWLIST";
   bypassStatic.value = String(!!p.bypassStaticAssets);
@@ -66,21 +110,11 @@ function policyToForm(p) {
 }
 
 function formToPolicy() {
-  const domains = allowDomains.value
-    .split("\n")
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  const contains = allowUrlContains.value
-    .split("\n")
-    .map(s => s.trim())
-    .filter(Boolean);
-
   return {
     scopeMode: scopeMode.value,
     bypassStaticAssets: bypassStatic.value === "true",
-    allowDomains: domains,
-    allowUrlContains: contains
+    allowDomains: allowDomains.value.split("\n").map(s => s.trim()).filter(Boolean),
+    allowUrlContains: allowUrlContains.value.split("\n").map(s => s.trim()).filter(Boolean)
   };
 }
 
@@ -94,7 +128,6 @@ async function savePolicy() {
   const res = await browser.runtime.sendMessage({ type: "SET_POLICY", policy: p });
   responseBox.textContent = pretty(res);
 }
-
 
 function setButtonsEnabled(enabled) {
   btnForward.disabled = !enabled;
@@ -122,11 +155,23 @@ function formatResponse(res) {
   out += `URL: ${r.url || ""}\n`;
   out += `Duration: ${r.durationMs}ms\n`;
 
+  // Show request headers (contains cookie/authorization → redaction visible here)
+  if (lastForwardedRequest && lastForwardedRequest.headers && Object.keys(lastForwardedRequest.headers).length) {
+    out += "\n--- Request Headers (sent) ---\n";
+    const drh = displayHeaders(lastForwardedRequest.headers);
+    for (const [k, v] of Object.entries(drh)) out += `${k}: ${v}\n`;
+    const reqRedacted = Object.keys(lastForwardedRequest.headers).filter(k => MILib.isSensitiveHeader(k)).length;
+    if (reqRedacted > 0 && !showSensitive) out += `(${reqRedacted} header redacted)\n`;
+  }
+
   if (r.headers) {
     out += "\n--- Response Headers ---\n";
-    for (const [k, v] of Object.entries(r.headers)) {
+    const dh = displayHeaders(r.headers);
+    for (const [k, v] of Object.entries(dh)) {
       out += `${k}: ${v}\n`;
     }
+    const respRedacted = Object.keys(r.headers).filter(k => MILib.isSensitiveHeader(k)).length;
+    if (respRedacted > 0 && !showSensitive) out += `(${respRedacted} header redacted)\n`;
   }
 
   if (r.body && r.body.bytesBase64) {
@@ -135,7 +180,7 @@ function formatResponse(res) {
     if (isText) {
       try {
         out += "\n--- Response Body ---\n";
-        out += atob(r.body.bytesBase64);
+        out += displayBody(atob(r.body.bytesBase64), ct);
       } catch (_) {
         out += "\n--- Response Body (base64) ---\n" + r.body.bytesBase64;
       }
@@ -149,15 +194,6 @@ function formatResponse(res) {
   }
 
   return out;
-}
-
-function parseHeadersJson(text) {
-  if (!text.trim()) return {};
-  try {
-    const obj = JSON.parse(text);
-    if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
-  } catch (_) {}
-  throw new Error("Headers non validi: inserisci un JSON object, es: {\"x-test\":\"1\"}");
 }
 
 // --- Context menu ---
@@ -192,10 +228,13 @@ ctxAddScope.addEventListener("click", async () => {
   hideCtxMenu();
 });
 
+// --- Queue ---
 function renderQueue(queue) {
   queueSize.textContent = String(queue.length);
-  setBulkButtonsEnabled(queue.length > 0);
-  queueList.innerHTML = "";
+  // Only enable bulk actions for non-observe intercepted items
+  const hasIntercepted = queue.some(q => !q.observe);
+  setBulkButtonsEnabled(hasIntercepted);
+  queueList.replaceChildren();
 
   if (!queue.length) {
     const d = document.createElement("div");
@@ -207,26 +246,23 @@ function renderQueue(queue) {
 
   for (const q of queue) {
     const item = document.createElement("div");
-    item.className = "item click";
+    item.className = "item click" + (q.observe ? " observe-item" : "");
     item.dataset.id = q.id;
 
     const u = new URL(q.url);
     const top = document.createElement("div");
-    // SAFE DOM building (no innerHTML)
     const left = document.createElement("div");
     left.className = "mono";
 
     const b = document.createElement("b");
     b.textContent = String(q.method || "");
     left.appendChild(b);
-
     left.appendChild(document.createTextNode(" " + String(u.host || "")));
 
     const right = document.createElement("div");
     right.className = "badge";
-    right.textContent = String(q.type || "");
+    right.textContent = q.observe ? "OBSERVE" : String(q.type || "");
 
-    top.innerHTML = ""; // optional: ensure empty
     top.appendChild(left);
     top.appendChild(right);
 
@@ -242,13 +278,13 @@ function renderQueue(queue) {
     item.appendChild(mid);
     item.appendChild(bot);
 
-    item.addEventListener("click", () => selectEntry(q));
+    if (!q.observe) {
+      item.addEventListener("click", () => selectEntry(q));
+    }
 
     // Long-press for context menu (mobile)
     let longPressTimer = null;
-    let touchMoved = false;
     item.addEventListener("touchstart", (e) => {
-      touchMoved = false;
       longPressTimer = setTimeout(() => {
         e.preventDefault();
         const touch = e.touches[0];
@@ -256,13 +292,11 @@ function renderQueue(queue) {
       }, 300);
     }, { passive: false });
     item.addEventListener("touchmove", () => {
-      touchMoved = true;
       if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
     });
     item.addEventListener("touchend", () => {
       if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
     });
-    // Desktop right-click
     item.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       showCtxMenu(e.clientX, e.clientY, q);
@@ -272,24 +306,15 @@ function renderQueue(queue) {
   }
 }
 
-function bodyToEditor(body) {
-  if (!body) return "";
-  if (body.kind === "formData") return pretty(body);
-  if (body.kind === "raw_base64" || body.kind === "raw_base64_truncated") {
-    return body.bytesBase64; // user can paste base64 raw
-  }
-  if (body.kind === "text") return body.text || "";
-  return pretty(body);
-}
-
 function selectEntry(entry) {
+  if (entry.observe) return;
   currentId = entry.id;
   currentEntry = entry;
 
   reqMethod.value = entry.method || "GET";
   reqUrl.value = entry.url || "";
   reqHeaders.value = pretty(entry.headers || {});
-  reqBody.value = bodyToEditor(entry.requestBody);
+  reqBody.value = MIUtils.bodyToEditor(entry.requestBody);
 
   editorHint.textContent = `Selezionata: ${entry.method} ${entry.url}`;
   setButtonsEnabled(true);
@@ -298,15 +323,15 @@ function selectEntry(entry) {
 async function refreshQueue() {
   const res = await browser.runtime.sendMessage({ type: "GET_QUEUE" });
   if (res?.ok) {
-    interceptEnabled = !!res.interceptEnabled;
-    toggleIntercept.checked = interceptEnabled;
+    updateModeUI(res.interceptMode || "OFF");
     renderQueue(res.queue || []);
   }
 }
 
+// --- Repeater ---
 async function refreshRepeater() {
   const res = await browser.runtime.sendMessage({ type: "LIST_REPEATER_ITEMS" });
-  repeaterList.innerHTML = "";
+  repeaterList.replaceChildren();
 
   const items = res?.items || [];
   if (!items.length) {
@@ -323,15 +348,12 @@ async function refreshRepeater() {
 
     const top = document.createElement("div");
     top.className = "row";
-    // SAFE DOM building (no innerHTML)
-    const leftWrap = document.createElement("div");
 
+    const leftWrap = document.createElement("div");
     const nameB = document.createElement("b");
     nameB.textContent = String(it.name || "Unnamed");
     leftWrap.appendChild(nameB);
-
     leftWrap.appendChild(document.createTextNode(" "));
-
     const methodSpan = document.createElement("span");
     methodSpan.className = "badge";
     methodSpan.textContent = String(it.request?.method || "");
@@ -341,7 +363,6 @@ async function refreshRepeater() {
     rightTime.className = "badge";
     rightTime.textContent = new Date(it.savedAt).toLocaleString();
 
-    top.innerHTML = ""; // optional
     top.appendChild(leftWrap);
     top.appendChild(rightTime);
 
@@ -360,7 +381,6 @@ async function refreshRepeater() {
       responseBox.textContent = "Running...";
       const r = await browser.runtime.sendMessage({ type: "RUN_REPEATER_ITEM", request: it.request });
       responseBox.textContent = formatResponse(r);
-      // Enable Save to Notes with repeater request+response
       lastForwardedRequest = it.request;
       lastForwardedResponse = r;
       btnSaveNote.disabled = false;
@@ -376,9 +396,9 @@ async function refreshRepeater() {
       reqMethod.value = req.method || "GET";
       reqUrl.value = req.url || "";
       reqHeaders.value = pretty(req.headers || {});
-      reqBody.value = bodyToEditor(req.body);
+      reqBody.value = MIUtils.bodyToEditor(req.body);
       editorHint.textContent = `Loaded from Repeater: ${it.name || "Unnamed"}`;
-      setButtonsEnabled(false); // not linked to queue item
+      setButtonsEnabled(false);
     });
 
     const del = document.createElement("button");
@@ -397,7 +417,6 @@ async function refreshRepeater() {
     box.appendChild(top);
     box.appendChild(mid);
     box.appendChild(actions);
-
     repeaterList.appendChild(box);
   }
 }
@@ -414,7 +433,7 @@ function decodeBodyForNote(body) {
 }
 
 function formatNoteForExport(note) {
-  const ts = new Date(note.timestamp).toLocaleString("sv-SE"); // YYYY-MM-DD HH:mm:ss
+  const ts = new Date(note.timestamp).toLocaleString("sv-SE");
   const req = note.request || {};
   const res = note.response || {};
   const resp = res.response || res;
@@ -423,45 +442,39 @@ function formatNoteForExport(note) {
   out += `[${ts}] ${req.method || "?"} ${req.url || "?"}\n`;
   out += "\u2550".repeat(50) + "\n\n";
 
-  // Request headers
   if (req.headers && Object.keys(req.headers).length) {
     out += "\u2500\u2500 REQUEST HEADERS \u2500\u2500\n";
-    for (const [k, v] of Object.entries(req.headers)) {
-      out += `${k}: ${v}\n`;
-    }
+    const dh = displayHeaders(req.headers);
+    for (const [k, v] of Object.entries(dh)) out += `${k}: ${v}\n`;
     out += "\n";
   }
 
-  // Request body
   const reqBodyText = decodeBodyForNote(req.body);
   if (reqBodyText) {
+    const ct = req.headers?.["content-type"] || "";
     out += "\u2500\u2500 REQUEST BODY \u2500\u2500\n";
-    out += reqBodyText + "\n\n";
+    out += displayBody(reqBodyText, ct) + "\n\n";
   }
 
-  // Response
   if (resp.status) {
     out += `\u2500\u2500 RESPONSE: ${resp.status} ${resp.statusText || ""} (${resp.durationMs || 0}ms) \u2500\u2500\n\n`;
   } else if (res.error) {
     out += `\u2500\u2500 RESPONSE ERROR: ${res.error} \u2500\u2500\n\n`;
   }
 
-  // Response headers
   if (resp.headers && Object.keys(resp.headers).length) {
     out += "\u2500\u2500 RESPONSE HEADERS \u2500\u2500\n";
-    for (const [k, v] of Object.entries(resp.headers)) {
-      out += `${k}: ${v}\n`;
-    }
+    const dh = displayHeaders(resp.headers);
+    for (const [k, v] of Object.entries(dh)) out += `${k}: ${v}\n`;
     out += "\n";
   }
 
-  // Response body
   if (resp.body && resp.body.bytesBase64) {
     const ct = (resp.headers && (resp.headers["content-type"] || "")) || "";
     const isText = /text|json|xml|html|javascript|css|svg|urlencoded/i.test(ct);
     out += "\u2500\u2500 RESPONSE BODY \u2500\u2500\n";
     if (isText) {
-      try { out += atob(resp.body.bytesBase64); } catch (_) { out += resp.body.bytesBase64; }
+      try { out += displayBody(atob(resp.body.bytesBase64), ct); } catch (_) { out += resp.body.bytesBase64; }
     } else {
       out += `[binary, ${resp.body.originalBytes || 0} bytes]`;
     }
@@ -474,7 +487,7 @@ function formatNoteForExport(note) {
 
 async function refreshNotes() {
   const res = await browser.runtime.sendMessage({ type: "LIST_NOTES" });
-  notesList.innerHTML = "";
+  notesList.replaceChildren();
   const notes = res?.notes || [];
 
   if (!notes.length) {
@@ -493,32 +506,27 @@ async function refreshNotes() {
     const res2 = note.response || {};
     const resp = res2.response || res2;
 
-    // Title row
     const titleRow = document.createElement("div");
     titleRow.className = "row";
-
     const titleLeft = document.createElement("div");
     titleLeft.className = "mono";
     const methodB = document.createElement("b");
     methodB.textContent = req.method || "?";
     titleLeft.appendChild(methodB);
     titleLeft.appendChild(document.createTextNode(" " + (req.url || "")));
-
     const titleRight = document.createElement("div");
     titleRight.className = "badge";
     titleRight.textContent = resp.status ? `${resp.status}` : "N/A";
-
     titleRow.appendChild(titleLeft);
     titleRow.appendChild(titleRight);
     card.appendChild(titleRow);
 
-    // Timestamp
     const tsDiv = document.createElement("div");
     tsDiv.className = "small";
     tsDiv.textContent = new Date(note.timestamp).toLocaleString();
     card.appendChild(tsDiv);
 
-    // Request headers (collapsible)
+    // Request headers (collapsible, redacted)
     if (req.headers && Object.keys(req.headers).length) {
       const det = document.createElement("details");
       const sum = document.createElement("summary");
@@ -531,14 +539,15 @@ async function refreshNotes() {
       pre.className = "pre";
       pre.style.fontSize = "11px";
       pre.style.minHeight = "auto";
+      const dh = displayHeaders(req.headers);
       let hText = "";
-      for (const [k, v] of Object.entries(req.headers)) hText += `${k}: ${v}\n`;
+      for (const [k, v] of Object.entries(dh)) hText += `${k}: ${v}\n`;
       pre.textContent = hText;
       det.appendChild(pre);
       card.appendChild(det);
     }
 
-    // Request body
+    // Request body (redacted)
     const reqBodyText = decodeBodyForNote(req.body);
     if (reqBodyText) {
       const det = document.createElement("details");
@@ -552,12 +561,13 @@ async function refreshNotes() {
       pre.className = "pre";
       pre.style.fontSize = "11px";
       pre.style.minHeight = "auto";
-      pre.textContent = reqBodyText;
+      const ct = req.headers?.["content-type"] || "";
+      pre.textContent = displayBody(reqBodyText, ct);
       det.appendChild(pre);
       card.appendChild(det);
     }
 
-    // Response headers
+    // Response headers (redacted)
     if (resp.headers && Object.keys(resp.headers).length) {
       const det = document.createElement("details");
       const sum = document.createElement("summary");
@@ -570,14 +580,15 @@ async function refreshNotes() {
       pre.className = "pre";
       pre.style.fontSize = "11px";
       pre.style.minHeight = "auto";
+      const dh = displayHeaders(resp.headers);
       let hText = "";
-      for (const [k, v] of Object.entries(resp.headers)) hText += `${k}: ${v}\n`;
+      for (const [k, v] of Object.entries(dh)) hText += `${k}: ${v}\n`;
       pre.textContent = hText;
       det.appendChild(pre);
       card.appendChild(det);
     }
 
-    // Response body
+    // Response body (redacted)
     if (resp.body && resp.body.bytesBase64) {
       const ct = (resp.headers && (resp.headers["content-type"] || "")) || "";
       const isText = /text|json|xml|html|javascript|css|svg|urlencoded/i.test(ct);
@@ -593,7 +604,7 @@ async function refreshNotes() {
       pre.style.fontSize = "11px";
       pre.style.minHeight = "auto";
       if (isText) {
-        try { pre.textContent = atob(resp.body.bytesBase64); } catch (_) { pre.textContent = resp.body.bytesBase64; }
+        try { pre.textContent = displayBody(atob(resp.body.bytesBase64), ct); } catch (_) { pre.textContent = resp.body.bytesBase64; }
       } else {
         pre.textContent = `[binary, ${resp.body.originalBytes || 0} bytes]`;
       }
@@ -601,7 +612,6 @@ async function refreshNotes() {
       card.appendChild(det);
     }
 
-    // Delete button
     const actions = document.createElement("div");
     actions.className = "actions";
     actions.style.marginTop = "6px";
@@ -620,50 +630,94 @@ async function refreshNotes() {
   }
 }
 
-// Realtime updates
+// --- Audit Log ---
+async function refreshAuditLog() {
+  const res = await browser.runtime.sendMessage({ type: "LIST_AUDIT_LOG" });
+  auditList.replaceChildren();
+  const entries = res?.log || [];
+
+  if (!entries.length) {
+    const d = document.createElement("div");
+    d.className = "muted";
+    d.textContent = "No audit entries.";
+    auditList.appendChild(d);
+    return;
+  }
+
+  for (const entry of entries.slice().reverse()) {
+    const item = document.createElement("div");
+    item.className = "item";
+
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const left = document.createElement("div");
+    left.className = "mono small";
+    const actionB = document.createElement("b");
+    actionB.textContent = entry.action;
+    left.appendChild(actionB);
+    if (entry.method) left.appendChild(document.createTextNode(` ${entry.method}`));
+    if (entry.mode) left.appendChild(document.createTextNode(` ${entry.mode}`));
+    if (entry.count != null) left.appendChild(document.createTextNode(` (${entry.count})`));
+
+    const right = document.createElement("div");
+    right.className = "small";
+    right.textContent = new Date(entry.timestamp).toLocaleString();
+
+    row.appendChild(left);
+    row.appendChild(right);
+    item.appendChild(row);
+
+    if (entry.url) {
+      const urlDiv = document.createElement("div");
+      urlDiv.className = "small mono";
+      urlDiv.textContent = entry.url;
+      item.appendChild(urlDiv);
+    }
+
+    auditList.appendChild(item);
+  }
+}
+
+// --- Realtime updates ---
 port.onMessage.addListener((m) => {
   if (!m || !m.type) return;
 
   if (m.type === "INIT") {
-    interceptEnabled = !!m.payload.interceptEnabled;
-    toggleIntercept.checked = interceptEnabled;
+    updateModeUI(m.payload.interceptMode || "OFF");
     renderQueue(m.payload.queue || []);
     queueSize.textContent = String((m.payload.queue || []).length);
     if (m.payload.policy) policyToForm(m.payload.policy);
   }
 
   if (m.type === "QUEUE_UPDATED") {
-    interceptEnabled = !!m.payload.interceptEnabled;
-    toggleIntercept.checked = interceptEnabled;
+    updateModeUI(m.payload.interceptMode || "OFF");
     queueSize.textContent = String(m.payload.size ?? 0);
-    // full refresh to keep simple
     refreshQueue();
   }
 
   if (m.type === "REQUEST_INTERCEPTED") {
-    // fast path: refresh queue
     refreshQueue();
   }
 
   if (m.type === "REQUEST_UPDATED") {
-    // could patch UI if selected; simplest: refresh
     refreshQueue();
   }
+
   if (m.type === "POLICY_UPDATED") {
     policyToForm(m.payload.policy);
   }
-
-
 });
 
-// Toggle intercept
-toggleIntercept.addEventListener("change", async () => {
-  const enabled = toggleIntercept.checked;
-  await browser.runtime.sendMessage({ type: "TOGGLE_INTERCEPT", enabled });
+// --- Mode selector ---
+interceptModeSelect.addEventListener("change", async () => {
+  const mode = interceptModeSelect.value;
+  await browser.runtime.sendMessage({ type: "TOGGLE_INTERCEPT", mode });
+  updateModeUI(mode);
   await refreshQueue();
 });
 
-// Forward / Drop
+// --- Forward / Drop ---
 btnDrop.addEventListener("click", async () => {
   if (!currentId) return;
   await browser.runtime.sendMessage({ type: "DROP_REQUEST", id: currentId });
@@ -680,20 +734,15 @@ btnForward.addEventListener("click", async () => {
 
   let headers;
   try {
-    headers = parseHeadersJson(reqHeaders.value);
+    headers = MIUtils.parseHeadersJson(reqHeaders.value);
   } catch (e) {
     responseBox.textContent = String(e);
     return;
   }
 
-  // Body strategy:
-  // - if looks like JSON in textarea => keep as text
-  // - otherwise treat as base64 raw (user can paste raw)
   const bodyText = reqBody.value || "";
   let body = null;
-
   if (bodyText.trim()) {
-    // Try parse as JSON {kind:...} (for formData/raw metadata)
     try {
       const obj = JSON.parse(bodyText);
       if (obj && typeof obj === "object" && obj.kind) {
@@ -702,7 +751,6 @@ btnForward.addEventListener("click", async () => {
         body = { kind: "text", text: bodyText };
       }
     } catch (_) {
-      // Assume base64 raw
       body = { kind: "raw_base64", bytesBase64: bodyText.trim() };
     }
   }
@@ -719,7 +767,6 @@ btnForward.addEventListener("click", async () => {
   responseBox.textContent = formatResponse(res);
   flashButton(btnForward, "flash-ok");
 
-  // Save for "Save to Notes"
   lastForwardedRequest = edited;
   lastForwardedResponse = res;
   btnSaveNote.disabled = false;
@@ -730,7 +777,7 @@ btnForward.addEventListener("click", async () => {
   await refreshQueue();
 });
 
-// Drop All / Forward All
+// --- Drop All / Forward All ---
 btnDropAll.addEventListener("click", async () => {
   await browser.runtime.sendMessage({ type: "DROP_ALL" });
   flashButton(btnDropAll, "flash-danger");
@@ -751,15 +798,15 @@ btnForwardAll.addEventListener("click", async () => {
   await refreshQueue();
 });
 
+// --- Save to Repeater ---
 btnSaveRepeater.addEventListener("click", async () => {
   if (!currentEntry) return;
 
   let headers;
-  try { headers = parseHeadersJson(reqHeaders.value); }
+  try { headers = MIUtils.parseHeadersJson(reqHeaders.value); }
   catch (e) { responseBox.textContent = String(e); return; }
 
   const name = `${reqMethod.value.toUpperCase()} ${new URL(reqUrl.value).pathname}`.slice(0, 80);
-
   const bodyText = reqBody.value || "";
   let body = null;
   if (bodyText.trim()) {
@@ -773,12 +820,7 @@ btnSaveRepeater.addEventListener("click", async () => {
 
   const item = {
     name,
-    request: {
-      method: reqMethod.value.trim() || "GET",
-      url: reqUrl.value.trim(),
-      headers,
-      body
-    }
+    request: { method: reqMethod.value.trim() || "GET", url: reqUrl.value.trim(), headers, body }
   };
 
   const res = await browser.runtime.sendMessage({ type: "SAVE_REPEATER_ITEM", item });
@@ -787,10 +829,10 @@ btnSaveRepeater.addEventListener("click", async () => {
   await refreshRepeater();
 });
 
-// Save to Notes
+// --- Save to Notes ---
 btnSaveNote.addEventListener("click", async () => {
   if (!lastForwardedRequest && !lastForwardedResponse) return;
-  const res = await browser.runtime.sendMessage({
+  await browser.runtime.sendMessage({
     type: "SAVE_NOTE",
     request: lastForwardedRequest,
     response: lastForwardedResponse
@@ -802,7 +844,7 @@ btnSaveNote.addEventListener("click", async () => {
   await refreshNotes();
 });
 
-// Export Notes
+// --- Export Notes ---
 btnExportNotes.addEventListener("click", async () => {
   const res = await browser.runtime.sendMessage({ type: "LIST_NOTES" });
   const notes = res?.notes || [];
@@ -813,10 +855,7 @@ btnExportNotes.addEventListener("click", async () => {
 
   let txt = "Mobile Interceptor - Notes Export\n";
   txt += "Generated: " + new Date().toLocaleString() + "\n\n";
-
-  for (const note of notes) {
-    txt += formatNoteForExport(note);
-  }
+  for (const note of notes) txt += formatNoteForExport(note);
 
   const blob = new Blob([txt], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -828,31 +867,53 @@ btnExportNotes.addEventListener("click", async () => {
   flashButton(btnExportNotes, "flash-ok");
 });
 
-// Clear Notes
+// --- Clear Notes ---
 btnClearNotes.addEventListener("click", async () => {
   await browser.runtime.sendMessage({ type: "CLEAR_NOTES" });
   flashButton(btnClearNotes, "flash-danger");
   await refreshNotes();
 });
 
+// --- Show sensitive toggle ---
+toggleSensitive.addEventListener("change", () => {
+  showSensitive = toggleSensitive.checked;
+  const label = toggleSensitive.parentElement.querySelector("span");
+  label.textContent = showSensitive ? "Sensitive: VISIBLE" : "Sensitive: HIDDEN";
+  refreshNotes();
+  // Re-render response box if we have cached response
+  if (lastForwardedResponse) {
+    responseBox.textContent = formatResponse(lastForwardedResponse);
+  }
+});
+
+// --- Audit log buttons ---
+btnRefreshAudit.addEventListener("click", refreshAuditLog);
+btnClearAudit.addEventListener("click", async () => {
+  await browser.runtime.sendMessage({ type: "CLEAR_AUDIT_LOG" });
+  flashButton(btnClearAudit, "flash-danger");
+  await refreshAuditLog();
+});
+
+// --- Other button handlers ---
 btnRefreshRepeater.addEventListener("click", refreshRepeater);
 btnLoadPolicy.addEventListener("click", loadPolicy);
 btnSavePolicy.addEventListener("click", savePolicy);
 
 btnPanicOff.addEventListener("click", async () => {
-  toggleIntercept.checked = false;
-  await browser.runtime.sendMessage({ type: "TOGGLE_INTERCEPT", enabled: false });
+  interceptModeSelect.value = "OFF";
+  await browser.runtime.sendMessage({ type: "TOGGLE_INTERCEPT", mode: "OFF" });
+  updateModeUI("OFF");
   responseBox.textContent = "PANIC: Intercept disabilitato.";
   flashButton(btnPanicOff, "flash-danger");
   await refreshQueue();
 });
 
-
-// Boot
+// --- Boot ---
 setButtonsEnabled(false);
 setBulkButtonsEnabled(false);
 btnSaveNote.disabled = true;
 refreshQueue();
 refreshRepeater();
 refreshNotes();
+refreshAuditLog();
 loadPolicy();

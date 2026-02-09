@@ -2,22 +2,25 @@
  * Mobile Interceptor (PT) - Firefox Android
  * Pattern: cancel original request -> replay via fetch after user edits.
  *
- * CRITICAL POINTS / ENDPOINTS (runtime messages):
- * - TOGGLE_INTERCEPT (enables/disables interception)
- * - GET_QUEUE (dashboard polling)
- * - DROP_REQUEST / FORWARD_REQUEST (queue actions)
- * - SAVE/LIST/RUN/DELETE_REPEATER_ITEM (repeater storage + replay)
- * - GET_POLICY / SET_POLICY (scope + bypass configuration)
- *
- * CRITICAL HOOKS:
- * - webRequest.onBeforeRequest (cancel original + capture body)
- * - webRequest.onBeforeSendHeaders (capture headers)
+ * Shared modules loaded before this file (via manifest.json):
+ * - lib/redact.js  -> globalThis.MILib  (redactHeaders, redactBody, trimArray, createRateLimiter)
+ * - lib/utils.js   -> globalThis.MIUtils (normalizeHeaders, hostMatchesWildcard, isStaticAssetUrl, shouldInterceptWith, parseHeadersJson, bodyToEditor)
  */
 
 "use strict";
 
+// --- Retention limits ---
+const RETENTION = {
+  notes: 200,
+  repeater: 50,
+  audit: 500
+};
+
+const OBSERVE_QUEUE_MAX = 100;
+
 const state = {
-  interceptEnabled: false,
+  // "OFF" | "OBSERVE" | "INTERCEPT"
+  interceptMode: "OFF",
 
   // Map requestId -> entry captured from webRequest
   pending: new Map(),
@@ -29,33 +32,34 @@ const state = {
   ports: new Set(),
 
   // TabIds that bypass interception temporarily (after Forward)
-  // Map<tabId, expiryTimestamp>
   passthrough: new Map(),
 
   // Soft limits
-  maxBodyCaptureBytes: 1024 * 256,   // 256KB capture cap for display/edit
-  maxResponseBytes: 1024 * 512       // 512KB response cap
+  maxBodyCaptureBytes: 1024 * 256,
+  maxResponseBytes: 1024 * 512
 };
 
-// --- Interception Policy (CRITICAL) ---
+// --- Rate limiter for replay ---
+const replayLimiter = MILib.createRateLimiter(200, 60);
+
+// --- Interception Policy ---
 const policy = {
-  scopeMode: "ALLOWLIST",              // "OFF" = intercept all, "ALLOWLIST" = intercept only allowDomains
-  allowDomains: [],                  // ["example.com", "*.example.com"]
-  allowUrlContains: [],              // ["/api/", "/graphql"]
+  scopeMode: "ALLOWLIST",
+  allowDomains: [],
+  allowUrlContains: [],
   bypassStaticAssets: true,
   bypassTypes: ["image", "stylesheet", "font", "media"],
   bypassOptions: true
 };
 
 const POLICY_KEY = "interceptorPolicy";
+const AUDIT_KEY = "interceptorAuditLog";
 
 (async function loadPolicy() {
   try {
     const cur = await browser.storage.local.get(POLICY_KEY);
     if (cur && cur[POLICY_KEY]) Object.assign(policy, cur[POLICY_KEY]);
-  } catch (_) {
-    // ignore; defaults are fine
-  }
+  } catch (_) {}
 })();
 
 async function savePolicy() {
@@ -68,6 +72,12 @@ function nowIso() {
 
 function safeClone(obj) {
   return JSON.parse(JSON.stringify(obj));
+}
+
+function genId() {
+  return (globalThis.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
 }
 
 function bufToBase64(arrayBuffer) {
@@ -87,16 +97,6 @@ function base64ToBuf(b64) {
   return bytes.buffer;
 }
 
-function normalizeHeaders(headersArr) {
-  const headers = {};
-  for (const h of headersArr || []) {
-    const name = (h.name || "").toLowerCase();
-    if (!name) continue;
-    headers[name] = h.value ?? "";
-  }
-  return headers;
-}
-
 function denormalizeHeaders(headersObj) {
   const h = new Headers();
   for (const [k, v] of Object.entries(headersObj || {})) {
@@ -111,10 +111,27 @@ function broadcast(type, payload) {
   }
 }
 
-// Android-safe: open dashboard in a tab (do not rely on options_ui entry)
+function broadcastQueue() {
+  broadcast("QUEUE_UPDATED", {
+    interceptMode: state.interceptMode,
+    size: state.queue.length
+  });
+}
+
+// --- Audit log ---
+async function appendAuditLog(action, details) {
+  try {
+    const cur = await browser.storage.local.get(AUDIT_KEY);
+    let log = Array.isArray(cur[AUDIT_KEY]) ? cur[AUDIT_KEY] : [];
+    log.push({ timestamp: nowIso(), action, ...details });
+    log = MILib.trimArray(log, RETENTION.audit);
+    await browser.storage.local.set({ [AUDIT_KEY]: log });
+  } catch (_) {}
+}
+
+// Android-safe: open dashboard in a tab
 async function openDashboardTab() {
   const url = browser.runtime.getURL("ui/dashboard.html");
-
   try {
     const tabs = await browser.tabs.query({});
     const existing = tabs.find(t => (t.url || "").startsWith(url));
@@ -123,68 +140,43 @@ async function openDashboardTab() {
       return;
     }
   } catch (_) {}
-
   await browser.tabs.create({ url });
 }
 
-function isStaticAssetUrl(url) {
-  return /\.(?:css|js|mjs|map|png|jpg|jpeg|gif|webp|svg|ico|woff2?|ttf|otf|eot|mp4|mp3|wav|avi|mov|pdf)(?:\?|#|$)/i.test(url);
-}
-
-function hostMatchesWildcard(host, rule) {
-  rule = String(rule || "").toLowerCase().trim();
-  host = String(host || "").toLowerCase().trim();
-  if (!rule || !host) return false;
-  if (rule.startsWith("*.")) {
-    const base = rule.slice(2);
-    return host === base || host.endsWith("." + base);
-  }
-  return host === rule;
-}
-
-function shouldIntercept(details) {
-  // Bypass first
-  if (policy.bypassOptions && details.method === "OPTIONS") return false;
-  if (policy.bypassTypes.includes(details.type)) return false;
-  if (policy.bypassStaticAssets && isStaticAssetUrl(details.url)) return false;
-
-  // Scope
-  if (policy.scopeMode === "OFF") return true;
-
-  // ALLOWLIST: if empty -> intercept nothing (safe default)
-  try {
-    const u = new URL(details.url);
-    const hostOk = policy.allowDomains.length > 0 &&
-      policy.allowDomains.some(r => hostMatchesWildcard(u.hostname, r));
-
-    const containsOk = policy.allowUrlContains.length === 0 ||
-      policy.allowUrlContains.some(s => String(s) && details.url.includes(s));
-
-    return hostOk && containsOk;
-  } catch (_) {
-    return false;
-  }
-}
-
-// --- Capture body: onBeforeRequest (CRITICAL) ---
-// Body is captured here; cancellation happens in onBeforeSendHeaders so headers are also captured.
+// --- Capture body: onBeforeRequest ---
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
-    // Only http/https
     if (!details.url.startsWith("http")) return {};
-
-    // Skip extension internal pages
     if (details.originUrl && details.originUrl.startsWith("moz-extension://")) return {};
 
-    // Passthrough: let forwarded-tab requests through for a time window
-    const ptExpiry = state.passthrough.get(details.tabId);
-    if (ptExpiry) {
-      if (Date.now() < ptExpiry) return {};
-      state.passthrough.delete(details.tabId);
+    const pt = state.passthrough.get(details.tabId);
+    if (pt) {
+      const elapsed = Date.now() - pt.time;
+      // Safety: expire after 30s no matter what
+      if (elapsed > 30000) {
+        state.passthrough.delete(details.tabId);
+      } else if (details.type === "main_frame") {
+        // First main_frame for the forwarded URL -> let through, mark done
+        if (!pt.mainFrameDone && details.url === pt.url) {
+          pt.mainFrameDone = true;
+          pt.mainFrameTime = Date.now();
+          return {};
+        }
+        // Any other main_frame (different URL, or same URL again) -> intercept
+        state.passthrough.delete(details.tabId);
+      } else {
+        // Sub-resource: let through only if main_frame loaded and within 10s
+        if (pt.mainFrameDone && (Date.now() - pt.mainFrameTime) < 10000) {
+          return {};
+        }
+        state.passthrough.delete(details.tabId);
+      }
     }
 
-    if (!state.interceptEnabled) return {};
-    if (!shouldIntercept(details)) return {};
+    if (state.interceptMode === "OFF") return {};
+    if (!MIUtils.shouldInterceptWith(details, policy)) return {};
+
+    const isObserve = state.interceptMode === "OBSERVE";
 
     const entry = {
       id: details.requestId,
@@ -196,12 +188,59 @@ browser.webRequest.onBeforeRequest.addListener(
       url: details.url,
       requestBody: null,
       bodyHint: null,
-      headers: null,     // filled by onBeforeSendHeaders before cancel
+      headers: null,
+      observe: isObserve,
       capturedFrom: "onBeforeRequest",
-      note: "Intercepted; awaiting user action"
+      note: isObserve ? "Observed (read-only)" : "Intercepted; awaiting user action"
     };
 
-    // Capture body if present (requires ["blocking","requestBody"])
+    // --- INTERCEPT: cancel IMMEDIATELY, defer all I/O ---
+    if (!isObserve) {
+      // Copy body bytes synchronously (ArrayBuffer may be GC'd after return)
+      let rawCopy = null;
+      let rawOrigLen = 0;
+      if (details.requestBody) {
+        try {
+          if (details.requestBody.raw && details.requestBody.raw.length > 0) {
+            const first = details.requestBody.raw[0]?.bytes;
+            if (first) {
+              rawOrigLen = first.byteLength || 0;
+              rawCopy = new Uint8Array(first).slice(0, Math.min(rawOrigLen, state.maxBodyCaptureBytes));
+            }
+          } else if (details.requestBody.formData) {
+            entry.requestBody = { kind: "formData", formData: safeClone(details.requestBody.formData) };
+          }
+        } catch (_) {}
+      }
+
+      state.pending.set(details.requestId, entry);
+      state.queue.push(details.requestId);
+
+      // CANCEL IMMEDIATELY — no I/O before this point
+      const cancelResponse = { cancel: true };
+
+      // Heavy work AFTER the return via setTimeout
+      setTimeout(() => {
+        if (rawCopy) {
+          entry.requestBody = {
+            kind: rawCopy.length < rawOrigLen ? "raw_base64_truncated" : "raw_base64",
+            bytesBase64: bufToBase64(rawCopy.buffer),
+            originalBytes: rawOrigLen,
+            capturedBytes: rawCopy.length
+          };
+          entry.bodyHint = rawCopy.length < rawOrigLen
+            ? `RAW body > cap (${rawOrigLen} bytes). Truncated to ${rawCopy.length}.`
+            : `RAW body captured (${rawOrigLen} bytes).`;
+        }
+        console.log("[MI] BLOCKED in onBeforeRequest", details.requestId, details.url);
+        broadcastQueue();
+        broadcast("REQUEST_INTERCEPTED", { entry });
+      }, 0);
+
+      return cancelResponse;
+    }
+
+    // --- OBSERVE: no timing pressure, process body normally ---
     if (details.requestBody) {
       try {
         if (details.requestBody.raw && details.requestBody.raw.length > 0) {
@@ -238,37 +277,41 @@ browser.webRequest.onBeforeRequest.addListener(
     state.pending.set(details.requestId, entry);
     state.queue.push(details.requestId);
 
-    // Notify UI
-    broadcast("QUEUE_UPDATED", { interceptEnabled: state.interceptEnabled, size: state.queue.length });
+    // Auto-trim OBSERVE queue
+    if (state.queue.length > OBSERVE_QUEUE_MAX) {
+      const oldId = state.queue.shift();
+      state.pending.delete(oldId);
+    }
+
+    console.log("[MI] captured", details.requestId, details.method, details.url, "mode:", state.interceptMode, "OBSERVE");
+
+    broadcastQueue();
     broadcast("REQUEST_INTERCEPTED", { entry });
 
-    // Do NOT cancel here — onBeforeSendHeaders will capture headers then cancel
     return {};
   },
   { urls: ["<all_urls>"] },
   ["blocking", "requestBody"]
 );
 
-// --- Capture headers + cancel: onBeforeSendHeaders (CRITICAL) ---
-// This fires AFTER onBeforeRequest, so headers are available. We cancel here.
+// --- Capture headers (non-blocking, fires only for OBSERVE / passthrough) ---
+// In INTERCEPT mode, requests are cancelled in onBeforeRequest so this never fires.
 browser.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
-    const entry = state.pending.get(details.requestId);
-    if (!entry) return {};
-
-    // Capture headers
-    entry.headers = normalizeHeaders(details.requestHeaders);
-
-    broadcast("REQUEST_UPDATED", { id: entry.id, patch: { headers: entry.headers } });
-
-    // NOW cancel the request (after headers are captured)
-    return { cancel: true };
+    try {
+      const entry = state.pending.get(details.requestId);
+      if (!entry) return;
+      entry.headers = MIUtils.normalizeHeaders(details.requestHeaders);
+      broadcast("REQUEST_UPDATED", { id: entry.id, patch: { headers: entry.headers } });
+    } catch (e) {
+      console.error("[MI] onBeforeSendHeaders error:", e);
+    }
   },
   { urls: ["<all_urls>"] },
-  ["blocking", "requestHeaders"]
+  ["requestHeaders"]
 );
 
-// Browser action opens dashboard (Android-friendly)
+// Browser action opens dashboard
 if (browser.browserAction && browser.browserAction.onClicked) {
   browser.browserAction.onClicked.addListener(() => {
     openDashboardTab().catch(e => console.log("[MI] openDashboardTab error:", e));
@@ -285,14 +328,14 @@ browser.runtime.onConnect.addListener((port) => {
   port.postMessage({
     type: "INIT",
     payload: {
-      interceptEnabled: state.interceptEnabled,
+      interceptMode: state.interceptMode,
       queue: state.queue.map((id) => state.pending.get(id)).filter(Boolean),
       policy
     }
   });
 });
 
-// Messages from UI (CRITICAL)
+// --- Messages from UI ---
 browser.runtime.onMessage.addListener(async (msg) => {
   if (!msg || !msg.type) return { ok: false, error: "Missing msg.type" };
 
@@ -303,15 +346,24 @@ browser.runtime.onMessage.addListener(async (msg) => {
     }
 
     case "TOGGLE_INTERCEPT": {
-      state.interceptEnabled = !!msg.enabled;
-      // console.log("[MI] TOGGLE_INTERCEPT:", state.interceptEnabled);
-      broadcast("QUEUE_UPDATED", { interceptEnabled: state.interceptEnabled, size: state.queue.length });
-      return { ok: true, interceptEnabled: state.interceptEnabled };
+      // Support new mode string or legacy boolean
+      if (msg.mode) {
+        state.interceptMode = msg.mode;
+      } else {
+        state.interceptMode = msg.enabled ? "INTERCEPT" : "OFF";
+      }
+      if (state.interceptMode !== "INTERCEPT") {
+        state.pending.clear();
+        state.queue = [];
+      }
+      broadcastQueue();
+      appendAuditLog("TOGGLE_INTERCEPT", { mode: state.interceptMode });
+      return { ok: true, interceptMode: state.interceptMode };
     }
 
     case "GET_QUEUE": {
       const queueEntries = state.queue.map((id) => state.pending.get(id)).filter(Boolean);
-      return { ok: true, interceptEnabled: state.interceptEnabled, queue: queueEntries };
+      return { ok: true, interceptMode: state.interceptMode, queue: queueEntries };
     }
 
     case "DROP_REQUEST": {
@@ -319,46 +371,44 @@ browser.runtime.onMessage.addListener(async (msg) => {
       const entry = state.pending.get(id);
       state.pending.delete(id);
       state.queue = state.queue.filter((x) => x !== id);
-      broadcast("QUEUE_UPDATED", { interceptEnabled: state.interceptEnabled, size: state.queue.length });
+      broadcastQueue();
 
-      // Navigate tab to about:blank so it doesn't stay frozen
       if (entry && entry.tabId > 0 && entry.type === "main_frame") {
-        state.passthrough.set(entry.tabId, Date.now() + 3000);
+        const now = Date.now();
+        state.passthrough.set(entry.tabId, { url: "about:blank", time: now, mainFrameDone: true, mainFrameTime: now });
         try { await browser.tabs.update(entry.tabId, { url: "about:blank" }); } catch (_) {}
       }
 
+      appendAuditLog("DROP", { requestId: id, method: entry?.method, url: entry?.url });
       return { ok: true };
     }
 
     case "FORWARD_REQUEST": {
       const id = msg.id;
-      const edited = msg.edited; // {method,url,headers,body}
+      const edited = msg.edited;
       const entry = state.pending.get(id);
       const resp = await replayRequest(edited);
 
       state.pending.delete(id);
       state.queue = state.queue.filter((x) => x !== id);
-      broadcast("QUEUE_UPDATED", { interceptEnabled: state.interceptEnabled, size: state.queue.length });
+      broadcastQueue();
 
-      // Navigate the original tab so it doesn't stay blank (main_frame only)
-      // Give 10 seconds for the page + sub-resources to load without interception
       if (entry && entry.tabId > 0 && entry.type === "main_frame") {
-        state.passthrough.set(entry.tabId, Date.now() + 10000);
+        state.passthrough.set(entry.tabId, { url: edited.url, time: Date.now(), mainFrameDone: false, mainFrameTime: 0 });
         try { await browser.tabs.update(entry.tabId, { url: edited.url }); } catch (_) {}
       }
 
+      appendAuditLog("FORWARD", { requestId: id, method: edited.method, url: edited.url });
       return { ok: true, response: resp };
     }
 
     case "SAVE_REPEATER_ITEM": {
-      const item = msg.item; // {name, request: {...}}
+      const item = msg.item;
       const key = "repeaterItems";
       const cur = await browser.storage.local.get(key);
-      const arr = Array.isArray(cur[key]) ? cur[key] : [];
-
-      const rid = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
-      arr.push({ ...item, savedAt: nowIso(), id: rid });
-
+      let arr = Array.isArray(cur[key]) ? cur[key] : [];
+      arr.push({ ...item, savedAt: nowIso(), id: genId() });
+      arr = MILib.trimArray(arr, RETENTION.repeater);
       await browser.storage.local.set({ [key]: arr });
       return { ok: true, count: arr.length };
     }
@@ -392,25 +442,29 @@ browser.runtime.onMessage.addListener(async (msg) => {
       Object.assign(policy, msg.policy || {});
       await savePolicy();
       broadcast("POLICY_UPDATED", { policy });
+      appendAuditLog("POLICY_CHANGE", { scopeMode: policy.scopeMode, domainCount: policy.allowDomains.length });
       return { ok: true, policy };
     }
 
     case "DROP_ALL": {
-      // Navigate main_frame tabs to about:blank with passthrough, then clear queue
+      const count = state.queue.length;
       for (const id of state.queue) {
         const entry = state.pending.get(id);
         if (entry && entry.tabId > 0 && entry.type === "main_frame") {
-          state.passthrough.set(entry.tabId, Date.now() + 3000);
+          const now = Date.now();
+          state.passthrough.set(entry.tabId, { url: "about:blank", time: now, mainFrameDone: true, mainFrameTime: now });
           try { await browser.tabs.update(entry.tabId, { url: "about:blank" }); } catch (_) {}
         }
       }
       state.pending.clear();
       state.queue = [];
-      broadcast("QUEUE_UPDATED", { interceptEnabled: state.interceptEnabled, size: 0 });
+      broadcastQueue();
+      appendAuditLog("DROP_ALL", { count });
       return { ok: true };
     }
 
     case "FORWARD_ALL": {
+      const count = state.queue.length;
       const results = [];
       for (const id of state.queue) {
         const entry = state.pending.get(id);
@@ -425,27 +479,31 @@ browser.runtime.onMessage.addListener(async (msg) => {
         results.push({ id, resp });
 
         if (entry.tabId > 0 && entry.type === "main_frame") {
-          state.passthrough.set(entry.tabId, Date.now() + 10000);
+          state.passthrough.set(entry.tabId, { url: entry.url, time: Date.now(), mainFrameDone: false, mainFrameTime: 0 });
           try { await browser.tabs.update(entry.tabId, { url: entry.url }); } catch (_) {}
         }
         state.pending.delete(id);
+
+        // Rate-limit delay between forwards
+        await new Promise(r => setTimeout(r, 100));
       }
       state.queue = [];
-      broadcast("QUEUE_UPDATED", { interceptEnabled: state.interceptEnabled, size: 0 });
+      broadcastQueue();
+      appendAuditLog("FORWARD_ALL", { count: results.length });
       return { ok: true, forwarded: results.length };
     }
 
     case "SAVE_NOTE": {
       const noteKey = "interceptorNotes";
       const cur = await browser.storage.local.get(noteKey);
-      const arr = Array.isArray(cur[noteKey]) ? cur[noteKey] : [];
-      const nid = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+      let arr = Array.isArray(cur[noteKey]) ? cur[noteKey] : [];
       arr.push({
-        id: nid,
+        id: genId(),
         timestamp: nowIso(),
         request: msg.request || null,
         response: msg.response || null
       });
+      arr = MILib.trimArray(arr, RETENTION.notes);
       await browser.storage.local.set({ [noteKey]: arr });
       return { ok: true, count: arr.length };
     }
@@ -470,13 +528,28 @@ browser.runtime.onMessage.addListener(async (msg) => {
       return { ok: true };
     }
 
+    case "LIST_AUDIT_LOG": {
+      const cur = await browser.storage.local.get(AUDIT_KEY);
+      return { ok: true, log: Array.isArray(cur[AUDIT_KEY]) ? cur[AUDIT_KEY] : [] };
+    }
+
+    case "CLEAR_AUDIT_LOG": {
+      await browser.storage.local.set({ [AUDIT_KEY]: [] });
+      return { ok: true };
+    }
+
     default:
       return { ok: false, error: "Unknown message type" };
   }
 });
 
-// --- Replay logic (CRITICAL) ---
+// --- Replay logic ---
 async function replayRequest(req) {
+  if (!replayLimiter.canProceed()) {
+    return { ok: false, error: "Rate limited. Wait before replaying.", durationMs: 0 };
+  }
+  replayLimiter.record();
+
   const method = (req.method || "GET").toUpperCase();
   const url = req.url;
 
@@ -489,10 +562,8 @@ async function replayRequest(req) {
 
     if (b.kind === "raw_base64" || b.kind === "raw_base64_truncated") {
       body = base64ToBuf(b.bytesBase64);
-
     } else if (b.kind === "text") {
       body = b.text;
-
     } else if (b.kind === "formData") {
       const usp = new URLSearchParams();
       for (const [k, vals] of Object.entries(b.formData || {})) {
@@ -552,4 +623,3 @@ async function replayRequest(req) {
     clearTimeout(timer);
   }
 }
-

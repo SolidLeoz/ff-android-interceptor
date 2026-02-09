@@ -7,16 +7,20 @@
   <link rel="stylesheet" href="dashboard.css" />
 </head>
 <body>
-  <header class="topbar">
+  <header class="topbar" id="topbar">
     <div>
       <div class="title">Mobile Interceptor</div>
       <div class="subtitle">Intercept + Repeater (Firefox Android)</div>
     </div>
 
-    <label class="toggle">
-      <input id="toggleIntercept" type="checkbox" />
-      <span>Intercept</span>
-    </label>
+    <div class="mode-switch">
+      <select id="interceptMode">
+        <option value="OFF">OFF</option>
+        <option value="OBSERVE">OBSERVE</option>
+        <option value="INTERCEPT">INTERCEPT</option>
+      </select>
+      <span id="armedBadge" class="armed-badge hidden"></span>
+    </div>
   </header>
 
   <main class="wrap">
@@ -111,7 +115,7 @@
       <details class="note">
         <summary>Limiti importanti</summary>
         <ul>
-          <li>La request originale viene <b>cancellata</b>; “Forward” è un <b>replay</b> via fetch.</li>
+          <li>La request originale viene <b>cancellata</b>; "Forward" è un <b>replay</b> via fetch.</li>
           <li>Alcuni header sono <b>proibiti</b> (Host/Cookie/alcuni Origin/Referer): il browser li filtra.</li>
           <li>Multipart file upload: spesso <b>non hai</b> i blob file completi via webRequest.</li>
         </ul>
@@ -128,8 +132,12 @@
 
       <div class="cardSub">
         <h3>Response</h3>
-        <div style="display:flex;gap:8px;margin-bottom:6px">
+        <div style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
           <button id="btnSaveNote" class="ghost btn-sm" disabled>Save to Notes</button>
+          <label class="toggle toggle-sm">
+            <input id="toggleSensitive" type="checkbox" />
+            <span>Show sensitive</span>
+          </label>
         </div>
         <pre id="responseBox" class="pre"></pre>
       </div>
@@ -146,12 +154,24 @@
       <div id="notesList" class="list"></div>
     </section>
 
+    <section class="card">
+      <div class="cardHead">
+        <h2>Audit Log</h2>
+        <div style="display:flex;gap:8px">
+          <button id="btnRefreshAudit" class="ghost btn-sm">Refresh</button>
+          <button id="btnClearAudit" class="danger btn-sm">Clear</button>
+        </div>
+      </div>
+      <div id="auditList" class="list"></div>
+    </section>
+
     <div id="ctxMenu" class="ctx-menu hidden">
       <div id="ctxAddScope" class="ctx-item">Aggiungi dominio allo scope</div>
     </div>
   </main>
 
+  <script src="../lib/redact.js"></script>
+  <script src="../lib/utils.js"></script>
   <script src="dashboard.js"></script>
 </body>
 </html>
-
