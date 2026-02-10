@@ -37,8 +37,12 @@ Prerequisites: `adb`, `web-ext` (npm), USB debugging enabled on the device.
 # Check device is connected
 adb devices -l
 
+# Build dist
+npm install
+npm run build
+
 # Install and run (auto-reload on file changes)
-web-ext run --target=firefox-android \
+web-ext run --target=firefox-android --source-dir=dist \
   --android-device=<DEVICE_ID> \
   --firefox-apk=org.mozilla.fenix \
   --adb-remove-old-artifacts
@@ -57,19 +61,21 @@ adb push mobile-interceptor.xpi /sdcard/Download/
 
 ### Firefox Desktop (for development)
 
-1. Open `about:debugging#/runtime/this-firefox`
-2. Click "Load Temporary Add-on"
-3. Select `manifest.json`
+1. Run `npm install && npm run build`
+2. Open `about:debugging#/runtime/this-firefox`
+3. Click "Load Temporary Add-on"
+4. Select `dist/manifest.json`
 
 ## Build
 
-No bundlers, transpilers, or build tools — source files are shipped as-is.
+TypeScript + esbuild are used to produce a `dist/` package for MV3.
 
 ```bash
-# Only requirement: zip (infozip)
+# Requirements: zip (infozip) + Node.js
 sudo apt-get install -y zip
+npm install
 
-# Build XPI
+# Build dist + XPI
 ./build.sh
 # Output: mobile-interceptor.xpi
 ```
@@ -92,20 +98,22 @@ See [SECURITY.md](SECURITY.md) for the full threat model.
 ## Project Structure
 
 ```
-manifest.json          Extension manifest (Manifest V2, Gecko)
-background.js          Background script: interception, replay, storage handlers
-lib/
-  redact.js            Shared: redaction, retention trimming, rate limiting
-  utils.js             Shared: header normalization, scope matching, parsing
-ui/
-  dashboard.html       Dashboard UI
-  dashboard.js         Dashboard logic: queue, editor, repeater, notes, audit
-  dashboard.css        Dark theme, animations, responsive layout
+manifest.json          Extension manifest (Manifest V3, Gecko)
+src/
+  background/          Service worker modules (interception, replay, storage)
+  lib/                 Shared utilities (redaction, policy helpers)
+  ui/                  Dashboard UI (TS + HTML/CSS)
+dist/                  Build output (packaged)
+background.js          Legacy JS (kept for reference; build uses src/)
+lib/                   Legacy JS (kept for reference; build uses src/)
+ui/                    Legacy JS (kept for reference; build uses src/)
 icons/
   icon-48.png          Extension icon 48x48
   icon-96.png          Extension icon 96x96
 tests/
-  test.js              Unit tests (49 cases, Node.js assert)
+  test.js              Unit tests (Node.js assert)
+scripts/
+  build.js             Build pipeline (esbuild)
 build.sh               Build script (lint + zip -> .xpi)
 ```
 
@@ -182,6 +190,7 @@ webRequest.onBeforeRequest      onBeforeSendHeaders (blocking)
 ```bash
 npm test     # Run 49 unit tests
 npm run lint # Run web-ext lint
+npm run typecheck # TypeScript type check
 ```
 
 ## Documentation

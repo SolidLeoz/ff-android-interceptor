@@ -16,11 +16,17 @@ jobs:
         with:
           node-version: 20
 
+      - name: Install dependencies
+        run: npm install
+
       - name: Run unit tests
         run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
 
       - name: Install web-ext
         run: npm install -g web-ext
 
       - name: Run web-ext lint
-        run: web-ext lint --source-dir=.
+        run: npm run lint

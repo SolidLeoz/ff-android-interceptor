@@ -1,8 +1,8 @@
 "use strict";
 
 const assert = require("assert");
-const MILib = require("../lib/redact.js");
-const MIUtils = require("../lib/utils.js");
+const MILib = require("../dist/lib/redact.cjs");
+const MIUtils = require("../dist/lib/utils.cjs");
 
 let passed = 0;
 let failed = 0;

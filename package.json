@@ -3,7 +3,14 @@
   "version": "0.3.1",
   "private": true,
   "scripts": {
-    "test": "node tests/test.js",
-    "lint": "web-ext lint"
+    "build": "node scripts/build.js",
+    "test": "npm run build && node tests/test.js",
+    "lint": "web-ext lint --source-dir=dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/firefox-webext-browser": "^121.0.3",
+    "esbuild": "^0.20.2",
+    "typescript": "^5.3.3"
   }
 }
