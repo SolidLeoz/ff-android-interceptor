@@ -144,7 +144,7 @@ select{
   outline:none;
 }
 
-/* Flash verde su azione riuscita */
+/* Green flash on successful action */
 @keyframes flashOk {
   0% { box-shadow: 0 0 0 rgba(92,255,154,0); }
   50% { box-shadow: 0 0 18px rgba(92,255,154,.5); }
@@ -152,7 +152,7 @@ select{
 }
 .flash-ok { animation: flashOk 0.4s ease-out; }
 
-/* Flash rosso su drop */
+/* Red flash on drop */
 @keyframes flashDanger {
   0% { box-shadow: 0 0 0 rgba(255,92,122,0); }
   50% { box-shadow: 0 0 18px rgba(255,92,122,.5); }
@@ -160,7 +160,7 @@ select{
 }
 .flash-danger { animation: flashDanger 0.4s ease-out; }
 
-/* Fade-in per nuovi item nella queue */
+/* Fade-in for new queue items */
 @keyframes fadeSlideIn {
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -234,3 +234,10 @@ select{
   gap: 4px;
 }
 .disclaimer.hidden { display:none }
+
+/* JSON syntax highlighting */
+.json-key { color: var(--accent) }
+.json-str { color: var(--ok) }
+.json-num { color: #c792ea }
+.json-bool { color: #ff9e64 }
+.json-null { color: var(--muted) }

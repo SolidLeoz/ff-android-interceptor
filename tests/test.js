@@ -216,11 +216,21 @@ test("returns empty object for empty input", () => {
 });
 
 test("throws on invalid JSON", () => {
-  assert.throws(() => MIUtils.parseHeadersJson("{bad}"), /non validi/);
+  assert.throws(() => MIUtils.parseHeadersJson("{bad}"), /Invalid headers/);
 });
 
 test("throws on JSON array (not object)", () => {
-  assert.throws(() => MIUtils.parseHeadersJson("[1,2,3]"), /non validi/);
+  assert.throws(() => MIUtils.parseHeadersJson("[1,2,3]"), /Invalid headers/);
+});
+
+test("error message is in English", () => {
+  try {
+    MIUtils.parseHeadersJson("{bad}");
+    assert.fail("should have thrown");
+  } catch (e) {
+    assert.ok(e.message.includes("Invalid headers"), "error should be in English");
+    assert.ok(e.message.includes("JSON object"), "should mention JSON object");
+  }
 });
 
 // ─── Utils: bodyToEditor ────────────────────────────────────────────
@@ -312,6 +322,68 @@ test("case-insensitive match", () => {
 test("returns false for non-sensitive headers", () => {
   assert.ok(!MILib.isSensitiveHeader("Content-Type"));
   assert.ok(!MILib.isSensitiveHeader("Accept"));
+});
+
+// ─── Redaction: redactUrl ────────────────────────────────────────────
+
+console.log("\nredactUrl");
+
+test("strips query params", () => {
+  const r = MILib.redactUrl("https://example.com/api/data?token=secret&id=5");
+  assert.strictEqual(r, "https://example.com/api/data?[REDACTED]");
+});
+
+test("preserves URL without query", () => {
+  const r = MILib.redactUrl("https://example.com/api/data");
+  assert.strictEqual(r, "https://example.com/api/data");
+});
+
+test("handles null/empty", () => {
+  assert.strictEqual(MILib.redactUrl(null), "");
+  assert.strictEqual(MILib.redactUrl(""), "");
+  assert.strictEqual(MILib.redactUrl(undefined), "");
+});
+
+test("fallback regex on malformed URL", () => {
+  const r = MILib.redactUrl("not-a-url?secret=123");
+  assert.strictEqual(r, "not-a-url?[REDACTED]");
+});
+
+// ─── Utils: escapeHtml ──────────────────────────────────────────────
+
+console.log("\nescapeHtml");
+
+test("escapes &, <, >", () => {
+  const r = MIUtils.escapeHtml('<script>alert("xss")&</script>');
+  assert.ok(r.includes("&lt;"));
+  assert.ok(r.includes("&gt;"));
+  assert.ok(r.includes("&amp;"));
+  assert.ok(!r.includes("<script>"));
+});
+
+// ─── Utils: highlightJson ───────────────────────────────────────────
+
+console.log("\nhighlightJson");
+
+test("highlights key/string/number/boolean/null", () => {
+  const json = '{"name":"test","count":42,"active":true,"data":null}';
+  const r = MIUtils.highlightJson(json);
+  assert.ok(r.includes('class="json-key"'), "should have json-key class");
+  assert.ok(r.includes('class="json-str"'), "should have json-str class");
+  assert.ok(r.includes('class="json-num"'), "should have json-num class");
+  assert.ok(r.includes('class="json-bool"'), "should have json-bool class");
+  assert.ok(r.includes('class="json-null"'), "should have json-null class");
+});
+
+test("non-JSON returns escaped HTML", () => {
+  const r = MIUtils.highlightJson("not json <b>bold</b>");
+  assert.ok(r.includes("&lt;b&gt;"));
+  assert.ok(!r.includes("<b>"));
+});
+
+test("null/empty returns empty string", () => {
+  assert.strictEqual(MIUtils.highlightJson(null), "");
+  assert.strictEqual(MIUtils.highlightJson(""), "");
 });
 
 // ─────────────────────────────────────────────────────────────────────
