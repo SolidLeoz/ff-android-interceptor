@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="it">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
@@ -32,15 +32,15 @@
 <section class="card">
   <div class="cardHead">
     <h2>Scope</h2>
-    <div class="muted">Intercept solo target</div>
+    <div class="muted">Intercept target only</div>
   </div>
 
   <div class="grid">
     <label>
       <span>Scope mode</span>
       <select id="scopeMode">
-        <option value="ALLOWLIST">ALLOWLIST (consigliato)</option>
-        <option value="OFF">OFF (intercetta tutto)</option>
+        <option value="ALLOWLIST">ALLOWLIST (recommended)</option>
+        <option value="OFF">OFF (intercept all)</option>
       </select>
     </label>
 
@@ -53,12 +53,12 @@
     </label>
 
     <label class="col2">
-      <span>Allow domains (uno per riga: example.com oppure *.example.com)</span>
+      <span>Allow domains (one per line: example.com or *.example.com)</span>
       <textarea id="allowDomains" rows="4" spellcheck="false"></textarea>
     </label>
 
     <label class="col2">
-      <span>Allow URL contains (uno per riga: /api/ , /graphql , ecc.)</span>
+      <span>Allow URL contains (one per line: /api/ , /graphql , etc.)</span>
       <textarea id="allowUrlContains" rows="3" spellcheck="false"></textarea>
     </label>
 
@@ -80,13 +80,14 @@
           <button id="btnDropAll" class="danger btn-sm" disabled>Drop All</button>
         </div>
       </div>
+      <input id="queueSearch" type="text" placeholder="Filter queue..." style="margin-bottom:8px" />
       <div id="queueList" class="list"></div>
     </section>
 
     <section class="card">
       <div class="cardHead">
         <h2>Editor</h2>
-        <div class="muted" id="editorHint">Seleziona una request dalla Queue.</div>
+        <div class="muted" id="editorHint">Select a request from the Queue.</div>
       </div>
 
       <div class="grid">
@@ -106,7 +107,7 @@
         </label>
 
         <label class="col2">
-          <span>Body (testo) oppure Base64 raw</span>
+          <span>Body (text) or Base64 raw</span>
           <textarea id="reqBody" rows="8" spellcheck="false"></textarea>
         </label>
 
@@ -116,13 +117,16 @@
           <button id="btnSaveRepeater" class="ghost" disabled>Send to Repeater</button>
         </div>
       </div>
+      <div class="muted" id="editorReadonlyHint" style="display:none;margin-top:6px;font-size:12px">
+        Method and body are read-only in intercept mode. Use Repeater for full editing.
+      </div>
 
       <details class="note">
-        <summary>Limiti importanti</summary>
+        <summary>Important limitations</summary>
         <ul>
-          <li>La request originale viene <b>cancellata</b>; "Forward" è un <b>replay</b> via fetch.</li>
-          <li>Alcuni header sono <b>proibiti</b> (Host/Cookie/alcuni Origin/Referer): il browser li filtra.</li>
-          <li>Multipart file upload: spesso <b>non hai</b> i blob file completi via webRequest.</li>
+          <li>The request is <b>held</b> (not cancelled); "Forward" releases it to the server.</li>
+          <li><b>URL and headers</b> are editable. Method and body are <b>read-only</b> — use Repeater for full editing.</li>
+          <li>The page receives the real server response after Forward.</li>
         </ul>
       </details>
     </section>
@@ -130,14 +134,19 @@
     <section class="card">
       <div class="cardHead">
         <h2>Repeater</h2>
-        <button id="btnRefreshRepeater" class="ghost">Refresh</button>
+        <div style="display:flex;gap:8px">
+          <button id="btnExportRepeater" class="ghost btn-sm">Export</button>
+          <label class="ghost btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:14px;padding:6px 10px;font-size:12px;font-weight:800">Import<input id="btnImportRepeater" type="file" accept=".json" style="display:none" /></label>
+          <button id="btnRefreshRepeater" class="ghost btn-sm">Refresh</button>
+        </div>
       </div>
 
       <div id="repeaterList" class="list"></div>
 
       <div class="cardSub">
         <h3>Response</h3>
-        <div style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
+        <div style="display:flex;gap:8px;margin-bottom:6px;align-items:center;flex-wrap:wrap">
+          <input id="noteMemo" type="text" placeholder="Memo (optional)" style="width:160px;padding:6px 10px;font-size:12px" />
           <button id="btnSaveNote" class="ghost btn-sm" disabled>Save to Notes</button>
           <label class="toggle toggle-sm">
             <input id="toggleSensitive" type="checkbox" />
@@ -152,8 +161,8 @@
       <div class="cardHead">
         <h2>Notes</h2>
         <div style="display:flex;gap:8px">
-          <button id="btnExportNotes" class="ghost btn-sm">Esporta</button>
-          <button id="btnClearNotes" class="danger btn-sm">Cancella tutto</button>
+          <button id="btnExportNotes" class="ghost btn-sm">Export</button>
+          <button id="btnClearNotes" class="danger btn-sm">Clear all</button>
         </div>
       </div>
       <div id="notesList" class="list"></div>
@@ -171,7 +180,7 @@
     </section>
 
     <div id="ctxMenu" class="ctx-menu hidden">
-      <div id="ctxAddScope" class="ctx-item">Aggiungi dominio allo scope</div>
+      <div id="ctxAddScope" class="ctx-item">Add domain to scope</div>
     </div>
   </main>
 

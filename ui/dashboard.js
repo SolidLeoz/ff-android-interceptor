@@ -12,6 +12,7 @@ let currentEntry = null;
 let lastForwardedRequest = null;
 let lastForwardedResponse = null;
 let showSensitive = false;
+let cachedQueue = [];
 
 const el = (id) => document.getElementById(id);
 
@@ -57,8 +58,14 @@ const auditList = el("auditList");
 const btnRefreshAudit = el("btnRefreshAudit");
 const btnClearAudit = el("btnClearAudit");
 
+const editorReadonlyHint = el("editorReadonlyHint");
+
 const ctxMenu = el("ctxMenu");
 const ctxAddScope = el("ctxAddScope");
+const queueSearch = el("queueSearch");
+const noteMemo = el("noteMemo");
+const btnExportRepeater = el("btnExportRepeater");
+const btnImportRepeater = el("btnImportRepeater");
 
 let ctxTarget = null;
 
@@ -79,6 +86,64 @@ function flashButton(btn, cls = "flash-ok") {
   void btn.offsetWidth;
   btn.classList.add(cls);
   btn.addEventListener("animationend", () => btn.classList.remove(cls), { once: true });
+}
+
+// --- Clear editor ---
+function clearEditor() {
+  currentId = null;
+  currentEntry = null;
+  reqMethod.value = "";
+  reqUrl.value = "";
+  reqHeaders.value = "";
+  reqBody.value = "";
+  reqMethod.readOnly = false;
+  reqBody.readOnly = false;
+  editorReadonlyHint.style.display = "none";
+  editorHint.textContent = "Select a request from the Queue.";
+  setButtonsEnabled(false);
+}
+
+// --- Render response to box (with JSON highlighting) ---
+function renderResponseToBox(res) {
+  const text = formatResponse(res);
+  // Check if response body is JSON for highlighting
+  const r = (res && res.response) || res || {};
+  const ct = (r.headers && (r.headers["content-type"] || "")) || "";
+  if (/json/i.test(ct) && r.body && r.body.bytesBase64) {
+    try {
+      const decoded = atob(r.body.bytesBase64);
+      JSON.parse(decoded); // validate it's JSON
+      // Build the non-body part with textContent, then append highlighted body
+      const bodyIdx = text.lastIndexOf("--- Response Body ---");
+      if (bodyIdx !== -1) {
+        const before = text.substring(0, bodyIdx + "--- Response Body ---".length) + "\n";
+        const bodyText = displayBody(decoded, ct);
+        responseBox.textContent = "";
+        const prePart = document.createTextNode(before);
+        responseBox.appendChild(prePart);
+        const bodySpan = document.createElement("span");
+        bodySpan.innerHTML = MIUtils.highlightJson(bodyText);
+        responseBox.appendChild(bodySpan);
+        return;
+      }
+    } catch (_) {}
+  }
+  responseBox.textContent = text;
+}
+
+// --- Queue filtering ---
+function getFilteredQueue() {
+  const term = (queueSearch.value || "").toLowerCase().trim();
+  if (!term) return cachedQueue;
+  return cachedQueue.filter(q =>
+    (q.method || "").toLowerCase().includes(term) ||
+    (q.url || "").toLowerCase().includes(term) ||
+    (q.type || "").toLowerCase().includes(term)
+  );
+}
+
+function renderFilteredQueue() {
+  renderQueue(getFilteredQueue());
 }
 
 // --- Mode UI ---
@@ -230,16 +295,16 @@ ctxAddScope.addEventListener("click", async () => {
 
 // --- Queue ---
 function renderQueue(queue) {
-  queueSize.textContent = String(queue.length);
+  queueSize.textContent = String(cachedQueue.length);
   // Only enable bulk actions for non-observe intercepted items
-  const hasIntercepted = queue.some(q => !q.observe);
+  const hasIntercepted = cachedQueue.some(q => !q.observe);
   setBulkButtonsEnabled(hasIntercepted);
   queueList.replaceChildren();
 
   if (!queue.length) {
     const d = document.createElement("div");
     d.className = "muted";
-    d.textContent = "Queue vuota.";
+    d.textContent = "Queue empty.";
     queueList.appendChild(d);
     return;
   }
@@ -316,7 +381,12 @@ function selectEntry(entry) {
   reqHeaders.value = pretty(entry.headers || {});
   reqBody.value = MIUtils.bodyToEditor(entry.requestBody);
 
-  editorHint.textContent = `Selezionata: ${entry.method} ${entry.url}`;
+  // In INTERCEPT mode: method and body are read-only (hold model)
+  reqMethod.readOnly = true;
+  reqBody.readOnly = true;
+  editorReadonlyHint.style.display = "block";
+
+  editorHint.textContent = `Selected: ${entry.method} ${entry.url}`;
   setButtonsEnabled(true);
 }
 
@@ -324,7 +394,8 @@ async function refreshQueue() {
   const res = await browser.runtime.sendMessage({ type: "GET_QUEUE" });
   if (res?.ok) {
     updateModeUI(res.interceptMode || "OFF");
-    renderQueue(res.queue || []);
+    cachedQueue = res.queue || [];
+    renderFilteredQueue();
   }
 }
 
@@ -337,7 +408,7 @@ async function refreshRepeater() {
   if (!items.length) {
     const d = document.createElement("div");
     d.className = "muted";
-    d.textContent = "Repeater vuoto.";
+    d.textContent = "Repeater empty.";
     repeaterList.appendChild(d);
     return;
   }
@@ -380,9 +451,9 @@ async function refreshRepeater() {
     run.addEventListener("click", async () => {
       responseBox.textContent = "Running...";
       const r = await browser.runtime.sendMessage({ type: "RUN_REPEATER_ITEM", request: it.request });
-      responseBox.textContent = formatResponse(r);
       lastForwardedRequest = it.request;
       lastForwardedResponse = r;
+      renderResponseToBox(r);
       btnSaveNote.disabled = false;
       flashButton(run, "flash-ok");
     });
@@ -440,6 +511,7 @@ function formatNoteForExport(note) {
 
   let out = "\u2550".repeat(50) + "\n";
   out += `[${ts}] ${req.method || "?"} ${req.url || "?"}\n`;
+  if (note.memo) out += `Memo: ${note.memo}\n`;
   out += "\u2550".repeat(50) + "\n\n";
 
   if (req.headers && Object.keys(req.headers).length) {
@@ -493,7 +565,7 @@ async function refreshNotes() {
   if (!notes.length) {
     const d = document.createElement("div");
     d.className = "muted";
-    d.textContent = "Nessuna nota salvata.";
+    d.textContent = "No saved notes.";
     notesList.appendChild(d);
     return;
   }
@@ -525,6 +597,15 @@ async function refreshNotes() {
     tsDiv.className = "small";
     tsDiv.textContent = new Date(note.timestamp).toLocaleString();
     card.appendChild(tsDiv);
+
+    if (note.memo) {
+      const memoDiv = document.createElement("div");
+      memoDiv.className = "small";
+      memoDiv.style.fontStyle = "italic";
+      memoDiv.style.color = "var(--accent)";
+      memoDiv.textContent = "Memo: " + note.memo;
+      card.appendChild(memoDiv);
+    }
 
     // Request headers (collapsible, redacted)
     if (req.headers && Object.keys(req.headers).length) {
@@ -617,7 +698,7 @@ async function refreshNotes() {
     actions.style.marginTop = "6px";
     const delBtn = document.createElement("button");
     delBtn.className = "danger btn-sm";
-    delBtn.textContent = "Elimina";
+    delBtn.textContent = "Delete";
     delBtn.addEventListener("click", async () => {
       await browser.runtime.sendMessage({ type: "DELETE_NOTE", id: note.id });
       flashButton(delBtn, "flash-danger");
@@ -685,8 +766,9 @@ port.onMessage.addListener((m) => {
 
   if (m.type === "INIT") {
     updateModeUI(m.payload.interceptMode || "OFF");
-    renderQueue(m.payload.queue || []);
-    queueSize.textContent = String((m.payload.queue || []).length);
+    cachedQueue = m.payload.queue || [];
+    renderFilteredQueue();
+    queueSize.textContent = String(cachedQueue.length);
     if (m.payload.policy) policyToForm(m.payload.policy);
   }
 
@@ -702,6 +784,10 @@ port.onMessage.addListener((m) => {
 
   if (m.type === "REQUEST_UPDATED") {
     refreshQueue();
+  }
+
+  if (m.type === "RESPONSE_CAPTURED") {
+    // Response captured via filterResponseData — could update UI if needed
   }
 
   if (m.type === "POLICY_UPDATED") {
@@ -724,7 +810,7 @@ btnDrop.addEventListener("click", async () => {
   flashButton(btnDrop, "flash-danger");
   currentId = null;
   currentEntry = null;
-  editorHint.textContent = "Dropped. Seleziona una request dalla Queue.";
+  editorHint.textContent = "Dropped. Select a request from the Queue.";
   setButtonsEnabled(false);
   await refreshQueue();
 });
@@ -740,40 +826,26 @@ btnForward.addEventListener("click", async () => {
     return;
   }
 
-  const bodyText = reqBody.value || "";
-  let body = null;
-  if (bodyText.trim()) {
-    try {
-      const obj = JSON.parse(bodyText);
-      if (obj && typeof obj === "object" && obj.kind) {
-        body = obj;
-      } else {
-        body = { kind: "text", text: bodyText };
-      }
-    } catch (_) {
-      body = { kind: "raw_base64", bytesBase64: bodyText.trim() };
-    }
-  }
-
   responseBox.textContent = "Forwarding...";
+  // Hold model: only URL and headers are editable; method/body go through unchanged
   const edited = {
-    method: reqMethod.value.trim() || "GET",
     url: reqUrl.value.trim(),
-    headers,
-    body
+    headers
   };
 
   const res = await browser.runtime.sendMessage({ type: "FORWARD_REQUEST", id: currentId, edited });
-  responseBox.textContent = formatResponse(res);
-  flashButton(btnForward, "flash-ok");
-
-  lastForwardedRequest = edited;
+  lastForwardedRequest = {
+    method: currentEntry?.method || reqMethod.value.trim() || "GET",
+    url: edited.url,
+    headers
+  };
   lastForwardedResponse = res;
+  renderResponseToBox(res);
+  flashButton(btnForward, "flash-ok");
   btnSaveNote.disabled = false;
 
   setButtonsEnabled(false);
-  currentId = null;
-  currentEntry = null;
+  clearEditor();
   await refreshQueue();
 });
 
@@ -781,20 +853,20 @@ btnForward.addEventListener("click", async () => {
 btnDropAll.addEventListener("click", async () => {
   await browser.runtime.sendMessage({ type: "DROP_ALL" });
   flashButton(btnDropAll, "flash-danger");
-  currentId = null;
-  currentEntry = null;
-  setButtonsEnabled(false);
+  clearEditor();
   await refreshQueue();
 });
 
 btnForwardAll.addEventListener("click", async () => {
   responseBox.textContent = "Forwarding all...";
   const res = await browser.runtime.sendMessage({ type: "FORWARD_ALL" });
-  responseBox.textContent = `Forwarded ${res.forwarded || 0} requests.`;
+  const fwd = res.forwarded || 0;
+  const fail = res.failed || 0;
+  responseBox.textContent = fail > 0
+    ? `Forwarded ${fwd}, failed ${fail}.`
+    : `Forwarded ${fwd} requests.`;
   flashButton(btnForwardAll, "flash-ok");
-  currentId = null;
-  currentEntry = null;
-  setButtonsEnabled(false);
+  clearEditor();
   await refreshQueue();
 });
 
@@ -834,11 +906,13 @@ btnSaveNote.addEventListener("click", async () => {
   if (!lastForwardedRequest && !lastForwardedResponse) return;
   await browser.runtime.sendMessage({
     type: "SAVE_NOTE",
+    memo: noteMemo.value.trim(),
     request: lastForwardedRequest,
     response: lastForwardedResponse
   });
   flashButton(btnSaveNote, "flash-ok");
   btnSaveNote.disabled = true;
+  noteMemo.value = "";
   lastForwardedRequest = null;
   lastForwardedResponse = null;
   await refreshNotes();
@@ -849,7 +923,7 @@ btnExportNotes.addEventListener("click", async () => {
   const res = await browser.runtime.sendMessage({ type: "LIST_NOTES" });
   const notes = res?.notes || [];
   if (!notes.length) {
-    responseBox.textContent = "Nessuna nota da esportare.";
+    responseBox.textContent = "No notes to export.";
     return;
   }
 
@@ -882,7 +956,7 @@ toggleSensitive.addEventListener("change", () => {
   refreshNotes();
   // Re-render response box if we have cached response
   if (lastForwardedResponse) {
-    responseBox.textContent = formatResponse(lastForwardedResponse);
+    renderResponseToBox(lastForwardedResponse);
   }
 });
 
@@ -903,7 +977,7 @@ btnPanicOff.addEventListener("click", async () => {
   interceptModeSelect.value = "OFF";
   await browser.runtime.sendMessage({ type: "TOGGLE_INTERCEPT", mode: "OFF" });
   updateModeUI("OFF");
-  responseBox.textContent = "PANIC: Intercept disabilitato.";
+  responseBox.textContent = "PANIC: Intercept disabled.";
   flashButton(btnPanicOff, "flash-danger");
   await refreshQueue();
 });
@@ -923,6 +997,49 @@ btnPanicOff.addEventListener("click", async () => {
     catch (e) { console.debug("[MI] disclaimer storage write:", e); }
   });
 })();
+
+// --- Queue search ---
+queueSearch.addEventListener("input", renderFilteredQueue);
+
+// --- Export Repeater ---
+btnExportRepeater.addEventListener("click", async () => {
+  const res = await browser.runtime.sendMessage({ type: "LIST_REPEATER_ITEMS" });
+  const items = res?.items || [];
+  if (!items.length) {
+    responseBox.textContent = "No repeater items to export.";
+    return;
+  }
+  const blob = new Blob([JSON.stringify(items, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "repeater-export-" + new Date().toISOString().slice(0, 10) + ".json";
+  a.click();
+  URL.revokeObjectURL(url);
+  flashButton(btnExportRepeater, "flash-ok");
+});
+
+// --- Import Repeater ---
+btnImportRepeater.addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const items = JSON.parse(text);
+    if (!Array.isArray(items)) throw new Error("Expected JSON array");
+    let imported = 0;
+    for (const it of items) {
+      if (!it.request) continue;
+      await browser.runtime.sendMessage({ type: "SAVE_REPEATER_ITEM", item: it });
+      imported++;
+    }
+    responseBox.textContent = `Imported ${imported} repeater items.`;
+    await refreshRepeater();
+  } catch (err) {
+    responseBox.textContent = "Import error: " + String(err);
+  }
+  btnImportRepeater.value = "";
+});
 
 // --- Boot ---
 setButtonsEnabled(false);

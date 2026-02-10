@@ -29,9 +29,10 @@ This document identifies the primary threats associated with running a request i
 **Risk**: Rapid-fire replaying of requests could trigger rate limits, account lockouts, or unintended state changes on the target server.
 
 **Mitigations**:
-- **Rate limiter**: minimum 200ms between replays, maximum 60 replays per minute
-- **Forward All**: includes 100ms delay between iterations
+- **Hold model**: Forward releases the original request (not a replay), so the server sees exactly one request per user action
+- **Repeater rate limiter**: minimum 200ms between replays, maximum 60 replays per minute
 - Rate-limited requests return an error message instead of silently failing
+- **Safety timeout**: held requests auto-forward after 60 seconds to prevent indefinite holds
 
 ## Threat 4: Unbounded storage growth
 
@@ -69,7 +70,7 @@ This document identifies the primary threats associated with running a request i
 | Permission | Required for | Alternative considered |
 |---|---|---|
 | `webRequest` | Observing HTTP requests | None — core functionality |
-| `webRequestBlocking` | Cancelling requests in INTERCEPT mode | Non-blocking would prevent interception |
+| `webRequestBlocking` | Holding requests in INTERCEPT mode (blocking Promise) | Non-blocking would prevent interception |
 | `<all_urls>` | Intercepting any target domain | Per-domain permissions would require manifest changes per target |
 | `storage` | Persisting notes, repeater, audit, policy | None — required for data persistence |
-| `tabs` | Navigating tab after forward | None — required for main_frame replay |
+| `tabs` | Navigating tab after drop, auto-forward on tab close | None — required for tab lifecycle management |

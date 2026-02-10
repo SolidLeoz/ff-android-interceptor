@@ -6,11 +6,12 @@ Intercept, inspect, edit and replay HTTP requests directly from your mobile devi
 
 ## Features
 
-- **Three Interception Modes** — OFF (default), OBSERVE (read-only monitoring), INTERCEPT (ARMED — cancels and holds requests)
-- **Request Interception** — Cancel and hold HTTP requests via `webRequest.onBeforeRequest` + `onBeforeSendHeaders`, capturing full headers and body
+- **Three Interception Modes** — OFF (default), OBSERVE (read-only monitoring), INTERCEPT (ARMED — holds requests via blocking Promise)
+- **Hold & Release** — INTERCEPT mode holds requests in-flight; Forward releases them to the server and the page receives the real response. No more broken tabs
+- **Response Capture** — Uses `filterResponseData()` to capture the response stream for dashboard display while passing it through to the page
 - **ARMED Indicator** — Topbar turns red (INTERCEPT) or orange (OBSERVE) with a pulsing badge to prevent accidental interception
-- **Editor** — Modify method, URL, headers (JSON), and body before forwarding
-- **Forward / Drop** — Replay the edited request via `fetch()` or drop it entirely
+- **Editor** — Modify URL and headers before forwarding. Method and body are read-only (use Repeater for full editing)
+- **Forward / Drop** — Forward releases the held request (with optional URL redirect and header edits); Drop cancels it
 - **Drop All / Forward All** — Bulk actions to clear or forward the entire queue at once
 - **Scope Policy** — Allowlist mode with domain patterns (`example.com`, `*.example.com`) and URL-contains filters (`/api/`, `/graphql`). Bypass static assets and OPTIONS requests
 - **Long-press Context Menu** — Long-press (mobile) or right-click (desktop) on a queue item to add its domain to the scope
@@ -104,18 +105,19 @@ icons/
   icon-48.png          Extension icon 48x48
   icon-96.png          Extension icon 96x96
 tests/
-  test.js              Unit tests (40 cases, Node.js assert)
+  test.js              Unit tests (49 cases, Node.js assert)
 build.sh               Build script (lint + zip -> .xpi)
 ```
 
 ## Architecture
 
 ```
-webRequest.onBeforeRequest     webRequest.onBeforeSendHeaders
+webRequest.onBeforeRequest      onBeforeSendHeaders (blocking)
         |                               |
-   capture body                   capture headers + cancel
+   capture body                   capture/edit headers
+   return Promise (HOLD)                |
         |                               |
-        +-------> pending Map <----------+
+        +-------> pending Map <---------+
                       |
                   queue[] (arrival order)
                       |
@@ -124,15 +126,18 @@ webRequest.onBeforeRequest     webRequest.onBeforeSendHeaders
             +---------+---------+
             |         |         |
          Forward    Drop     Repeater
-         (fetch)  (discard)  (storage)
-                      |
-                    Notes
-                  (storage)
+       (resolve)  (cancel)  (fetch replay)
+            |                     |
+   filterResponseData          Notes
+   (capture + pass-through)  (storage)
 ```
 
-- **Interception**: `onBeforeRequest` captures the body, `onBeforeSendHeaders` captures headers then cancels the request
-- **Forward**: Replays via `fetch()` with user-edited parameters. Navigates the original tab for `main_frame` requests
-- **Passthrough**: After forwarding, the tab gets a time-limited bypass to avoid re-intercepting sub-resources
+- **Hold model**: `onBeforeRequest` returns a Promise that holds the request. Forward resolves with `{}` or `{redirectUrl}`. Drop resolves with `{cancel: true}`
+- **Header editing**: `onBeforeSendHeaders` (blocking) applies user-edited headers before the request reaches the server
+- **Response capture**: `filterResponseData()` captures the response stream for the dashboard while passing it through to the page
+- **Passthrough**: After forwarding a `main_frame`, sub-resources get a time-limited bypass to avoid re-interception
+- **Safety**: Auto-forward after 60s timeout, on tab close, or on mode change
+- **Repeater**: Uses `fetch()` replay for full editing (method, body, headers, URL)
 - **Storage**: Repeater items and Notes are persisted in `browser.storage.local`
 
 ## Message Protocol
@@ -151,14 +156,16 @@ webRequest.onBeforeRequest     webRequest.onBeforeSendHeaders
 | `GET/SET_POLICY` | UI -> BG | Scope policy |
 | `QUEUE_UPDATED` | BG -> UI | Broadcast queue size + mode |
 | `REQUEST_INTERCEPTED` | BG -> UI | New request captured |
+| `RESPONSE_CAPTURED` | BG -> UI | Response captured via filterResponseData |
 | `POLICY_UPDATED` | BG -> UI | Policy changed |
 
 ## Limitations
 
-- The original request is **cancelled**; "Forward" is a **replay** via `fetch()` — not a true MITM proxy
-- Some headers are **forbidden** by the browser (Host, Cookie, some Origin/Referer)
+- **Method and body are read-only** in INTERCEPT mode (webRequest limitation) — use Repeater for full editing
+- Some headers are **forbidden** by the browser (Host, Cookie, some Origin/Referer) even in blocking mode
 - Multipart file uploads: raw file blobs are often **not available** via webRequest
 - Body capture is capped at 256KB, response capture at 512KB
+- Held requests auto-forward after **60 seconds** without user action
 - Temporary add-on: removed when Firefox restarts (unless using a custom AMO collection)
 
 ## Permissions
@@ -173,7 +180,7 @@ webRequest.onBeforeRequest     webRequest.onBeforeSendHeaders
 ## Testing
 
 ```bash
-npm test     # Run 40 unit tests
+npm test     # Run 49 unit tests
 npm run lint # Run web-ext lint
 ```
 

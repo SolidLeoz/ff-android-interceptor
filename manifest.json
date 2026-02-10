@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Mobile Interceptor (PT)",
-  "version": "0.2.1",
+  "version": "0.3.1",
   "description": "HTTP request interceptor and repeater for authorized penetration testing on Firefox Android. Inspect, modify, and replay HTTP traffic from explicitly scoped target domains.",
   "icons": {
     "32": "icons/icon-32.png",

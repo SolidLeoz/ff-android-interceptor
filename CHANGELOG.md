@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.1] - 2026-02-10
+
+### Changed
+- **Hold & Release model**: INTERCEPT mode now **holds** requests via a blocking Promise instead of cancelling them. When the user presses Forward, the original request proceeds to the server and the page receives the real response — no more broken tabs
+- **Response capture**: Uses `browser.webRequest.filterResponseData()` to intercept the response stream (pass-through to page + buffer for dashboard display)
+- **Editable fields in INTERCEPT**: URL and headers are editable; method and body are read-only (use Repeater for full editing)
+- **`onBeforeSendHeaders` is now blocking**: Applies user-edited headers before the request reaches the server
+- **`onHeadersReceived` listener**: Captures response status code and headers for dashboard display
+- **Forward resolves with `{redirectUrl}`** when URL is edited, enabling transparent URL rewriting
+- **Drop resolves with `{cancel: true}`**: Properly cancels the held request
+- **FORWARD_ALL**: Resolves all held promises without waiting for responses; deferred cleanup preserves entries for webRequest listeners
+- **Auto-forward on mode change**: Switching away from INTERCEPT auto-forwards all pending held requests
+- **Auto-forward on tab close**: `tabs.onRemoved` releases held requests for closed tabs
+- **Safety timeout**: Held requests auto-forward after 60 seconds without user action
+- **Dashboard**: Method/body fields shown as read-only with hint; Forward sends only URL + headers
+
 ## [0.2.0] - 2025-06-01
 
 ### Added
